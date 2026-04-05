@@ -42,10 +42,10 @@ export default function ChatSidebar({ collapsed, onToggle }: Props) {
 
   if (collapsed) {
     return (
-      <div className="flex flex-col items-center py-3 gap-1 w-12 shrink-0 bg-[#1a1a1c] border-r border-white/[0.06]">
+      <div className="flex flex-col items-center py-3 gap-1 w-12 shrink-0 bg-[#181819] border-r border-white/[0.06]">
         <button
           onClick={onToggle}
-          className="w-9 h-9 flex items-center justify-center rounded-lg text-text-tertiary hover:text-text-secondary hover:bg-white/[0.05] transition-colors"
+          className="w-9 h-9 flex items-center justify-center rounded-lg text-text-tertiary hover:text-text-secondary hover:bg-white/[0.07] transition-all duration-150"
           title="사이드바 열기"
         >
           <PanelLeft size={18} />
@@ -53,7 +53,7 @@ export default function ChatSidebar({ collapsed, onToggle }: Props) {
         <button
           onClick={handleNew}
           disabled={isAgentRunning}
-          className="w-9 h-9 flex items-center justify-center rounded-lg text-text-tertiary hover:text-text-secondary hover:bg-white/[0.05] transition-colors disabled:opacity-30 mt-1"
+          className="w-9 h-9 flex items-center justify-center rounded-lg text-text-tertiary hover:text-text-secondary hover:bg-white/[0.07] transition-all duration-150 disabled:opacity-30 mt-1"
           title="새 채팅"
         >
           <Plus size={18} />
@@ -61,7 +61,7 @@ export default function ChatSidebar({ collapsed, onToggle }: Props) {
         <div className="flex-1" />
         <button
           onClick={() => setSettingsOpen(true)}
-          className="w-9 h-9 flex items-center justify-center rounded-lg text-text-tertiary hover:text-text-secondary hover:bg-white/[0.05] transition-colors"
+          className="w-9 h-9 flex items-center justify-center rounded-lg text-text-tertiary hover:text-text-secondary hover:bg-white/[0.07] transition-all duration-150"
           title="설정"
         >
           <Settings size={16} />
@@ -71,12 +71,12 @@ export default function ChatSidebar({ collapsed, onToggle }: Props) {
   }
 
   return (
-    <div className="flex flex-col w-[260px] shrink-0 bg-[#1a1a1c] border-r border-white/[0.06]">
+    <div className="flex flex-col w-[260px] shrink-0 bg-[#181819] border-r border-white/[0.06]">
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-3">
         <button
           onClick={onToggle}
-          className="w-8 h-8 flex items-center justify-center rounded-lg text-text-tertiary hover:text-text-secondary hover:bg-white/[0.05] transition-colors"
+          className="w-8 h-8 flex items-center justify-center rounded-lg text-text-tertiary hover:text-text-secondary hover:bg-white/[0.07] transition-all duration-150"
           title="사이드바 닫기"
         >
           <PanelLeftClose size={18} />
@@ -84,7 +84,7 @@ export default function ChatSidebar({ collapsed, onToggle }: Props) {
         <button
           onClick={handleNew}
           disabled={isAgentRunning}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] text-text-secondary hover:text-text hover:bg-white/[0.05] transition-colors disabled:opacity-30"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] text-text-secondary hover:text-text hover:bg-white/[0.07] transition-all duration-150 disabled:opacity-30"
         >
           <Plus size={15} />
           새 채팅
@@ -119,15 +119,23 @@ export default function ChatSidebar({ collapsed, onToggle }: Props) {
                   onClick={() => switchConversation(conv.id)}
                   onMouseEnter={() => setHoveredId(conv.id)}
                   onMouseLeave={() => setHoveredId(null)}
-                  className={`w-full flex items-start gap-2.5 px-3 py-2.5 rounded-lg text-left transition-colors mb-0.5 group ${
+                  className={`w-full flex items-start gap-2.5 px-3 py-2.5 rounded-xl text-left transition-all duration-150 mb-0.5 group relative ${
                     isActive
                       ? "bg-white/[0.08] text-text"
-                      : "text-text-secondary hover:bg-white/[0.04]"
+                      : "text-text-secondary hover:bg-white/[0.05]"
                   }`}
                 >
+                  {/* Active indicator bar */}
+                  {isActive && (
+                    <motion.div
+                      layoutId="sidebar-active"
+                      className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-4 rounded-r-full bg-accent"
+                      transition={{ type: "spring", stiffness: 400, damping: 30 }}
+                    />
+                  )}
                   <MessageSquare
                     size={14}
-                    className="mt-0.5 shrink-0 opacity-50"
+                    className={`mt-0.5 shrink-0 ${isActive ? "opacity-70" : "opacity-40"}`}
                   />
                   <div className="flex-1 min-w-0">
                     <div className="text-[13px] truncate leading-tight">
@@ -143,7 +151,7 @@ export default function ChatSidebar({ collapsed, onToggle }: Props) {
                   {(isActive || isHovered) && !isAgentRunning && (
                     <button
                       onClick={(e) => handleDelete(e, conv.id)}
-                      className="shrink-0 mt-0.5 w-6 h-6 flex items-center justify-center rounded-md text-text-tertiary hover:text-error hover:bg-error/[0.1] transition-colors"
+                      className="shrink-0 mt-0.5 w-6 h-6 flex items-center justify-center rounded-md text-text-tertiary hover:text-error hover:bg-error/[0.1] transition-all duration-150"
                     >
                       <Trash2 size={12} />
                     </button>
@@ -159,7 +167,7 @@ export default function ChatSidebar({ collapsed, onToggle }: Props) {
       <div className="px-2 pb-3 pt-1 border-t border-white/[0.06]">
         <button
           onClick={() => setSettingsOpen(true)}
-          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] text-text-tertiary hover:text-text-secondary hover:bg-white/[0.05] transition-colors"
+          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] text-text-tertiary hover:text-text-secondary hover:bg-white/[0.07] transition-all duration-150"
         >
           <Settings size={14} />
           설정

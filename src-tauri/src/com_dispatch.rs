@@ -253,6 +253,111 @@ mod platform {
         }
     }
 
+    // ─── VT_BYREF 지원: output 파라미터를 사용하는 COM 메서드용 ───
+
+    /// VT_BYREF|VT_I4 VARIANT 생성 (output i32 파라미터)
+    unsafe fn make_byref_i4(target: *mut i32) -> VARIANT {
+        let mut var = VARIANT::default();
+        let inner = &mut *var.Anonymous.Anonymous;
+        inner.vt = VARENUM(0x4003); // VT_BYREF | VT_I4
+        // 포인터를 union 데이터 영역에 저장 (llVal은 8바이트로 64비트 포인터 수용)
+        inner.Anonymous.llVal = target as usize as i64;
+        var
+    }
+
+    /// VT_BYREF|VT_BSTR VARIANT 생성 (output 문자열 파라미터)
+    unsafe fn make_byref_bstr(target: *mut BSTR) -> VARIANT {
+        let mut var = VARIANT::default();
+        let inner = &mut *var.Anonymous.Anonymous;
+        inner.vt = VARENUM(0x4008); // VT_BYREF | VT_BSTR
+        inner.Anonymous.llVal = target as usize as i64;
+        var
+    }
+
+    impl ComObject {
+        /// hwp.GetPos() — output 파라미터로 (list, para, pos) 반환
+        pub fn get_pos(&self) -> anyhow::Result<(i32, i32, i32)> {
+            unsafe {
+                let dispid = self.get_dispid("GetPos")?;
+
+                let mut list: i32 = 0;
+                let mut para: i32 = 0;
+                let mut pos: i32 = 0;
+
+                // COM은 인자를 역순으로 전달: pos, para, list
+                let mut raws = [
+                    make_byref_i4(&mut pos),
+                    make_byref_i4(&mut para),
+                    make_byref_i4(&mut list),
+                ];
+
+                let dp = DISPPARAMS {
+                    rgvarg: raws.as_mut_ptr(),
+                    rgdispidNamedArgs: std::ptr::null_mut(),
+                    cArgs: 3,
+                    cNamedArgs: 0,
+                };
+                let mut result = VARIANT::default();
+                let mut ei = EXCEPINFO::default();
+                let mut ae = 0u32;
+
+                self.0.Invoke(
+                    dispid, &GUID::zeroed(), 0,
+                    DISPATCH_METHOD,
+                    &dp, Some(&mut result), Some(&mut ei), Some(&mut ae),
+                ).map_err(|e| anyhow::anyhow!("GetPos 실패: {e}"))?;
+
+                Ok((list, para, pos))
+            }
+        }
+
+        /// hwp.KeyIndicator() — output 파라미터로 문서 상태 반환
+        /// 반환: ctrlname (커서가 위치한 컨트롤 이름, 예: "표")
+        pub fn key_indicator(&self) -> anyhow::Result<String> {
+            unsafe {
+                let dispid = self.get_dispid("KeyIndicator")?;
+
+                let mut vals: [i32; 9] = [0; 9];
+                let mut ctrl_bstr = BSTR::default();
+
+                // 파라미터 순서: seccnt(0), secno(1), prgcnt(2), prgno(3),
+                //                colcnt(4), colno(5), line(6), pos(7), over(8), ctrlname
+                // COM 역순: ctrlname, over, pos, line, colno, colcnt, prgno, prgcnt, secno, seccnt
+                let mut raws = [
+                    make_byref_bstr(&mut ctrl_bstr), // ctrlname
+                    make_byref_i4(&mut vals[8]),      // over
+                    make_byref_i4(&mut vals[7]),      // pos
+                    make_byref_i4(&mut vals[6]),      // line
+                    make_byref_i4(&mut vals[5]),      // colno
+                    make_byref_i4(&mut vals[4]),      // colcnt
+                    make_byref_i4(&mut vals[3]),      // prgno
+                    make_byref_i4(&mut vals[2]),      // prgcnt
+                    make_byref_i4(&mut vals[1]),      // secno
+                    make_byref_i4(&mut vals[0]),      // seccnt
+                ];
+
+                let dp = DISPPARAMS {
+                    rgvarg: raws.as_mut_ptr(),
+                    rgdispidNamedArgs: std::ptr::null_mut(),
+                    cArgs: 10,
+                    cNamedArgs: 0,
+                };
+                let mut result = VARIANT::default();
+                let mut ei = EXCEPINFO::default();
+                let mut ae = 0u32;
+
+                self.0.Invoke(
+                    dispid, &GUID::zeroed(), 0,
+                    DISPATCH_METHOD,
+                    &dp, Some(&mut result), Some(&mut ei), Some(&mut ae),
+                ).map_err(|e| anyhow::anyhow!("KeyIndicator 실패: {e}"))?;
+
+                let ctrl_name = ctrl_bstr.to_string();
+                Ok(ctrl_name)
+            }
+        }
+    }
+
     unsafe fn variant_to_raw(v: &Variant) -> VARIANT {
         let mut var = VARIANT::default();
         let inner = &mut *var.Anonymous.Anonymous;
@@ -354,6 +459,12 @@ mod platform {
             anyhow::bail!("COM automation은 Windows 전용입니다.")
         }
         pub fn put(&self, _: &str, _: Variant) -> anyhow::Result<()> {
+            anyhow::bail!("COM automation은 Windows 전용입니다.")
+        }
+        pub fn get_pos(&self) -> anyhow::Result<(i32, i32, i32)> {
+            anyhow::bail!("COM automation은 Windows 전용입니다.")
+        }
+        pub fn key_indicator(&self) -> anyhow::Result<String> {
             anyhow::bail!("COM automation은 Windows 전용입니다.")
         }
     }

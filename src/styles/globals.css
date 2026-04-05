@@ -31,11 +31,11 @@ html, body, #root {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.08);
   border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.16);
 }
 
 /* ─── Title bar drag region ─────────────────────────── */
@@ -78,3 +78,119 @@ select {
 
 .typing-dot:nth-child(2) { animation-delay: 0.2s; }
 .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* ─── Shimmer effect for loading ───────────────────── */
+.shimmer-bar {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.03) 25%,
+    rgba(255, 255, 255, 0.08) 50%,
+    rgba(255, 255, 255, 0.03) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 2s linear infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* ─── Markdown prose in messages ───────────────────── */
+.prose-message {
+  font-size: 14px;
+  line-height: 1.65;
+  color: #f5f5f7;
+}
+
+.prose-message p {
+  margin-bottom: 0.5em;
+}
+.prose-message p:last-child {
+  margin-bottom: 0;
+}
+
+.prose-message h1, .prose-message h2, .prose-message h3 {
+  font-weight: 600;
+  margin-top: 1em;
+  margin-bottom: 0.4em;
+  color: #f5f5f7;
+}
+.prose-message h1 { font-size: 1.15em; }
+.prose-message h2 { font-size: 1.08em; }
+.prose-message h3 { font-size: 1em; }
+
+.prose-message code {
+  font-family: "SF Mono", "D2Coding", "Consolas", monospace;
+  font-size: 0.85em;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  color: #409cff;
+}
+
+.prose-message pre {
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin: 8px 0;
+  overflow-x: auto;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.prose-message pre code {
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  color: #e0e0e2;
+}
+
+.prose-message ul, .prose-message ol {
+  padding-left: 1.4em;
+  margin: 0.4em 0;
+}
+
+.prose-message li {
+  margin-bottom: 0.2em;
+}
+
+.prose-message blockquote {
+  border-left: 3px solid rgba(10, 132, 255, 0.4);
+  padding-left: 12px;
+  margin: 8px 0;
+  color: #98989d;
+}
+
+.prose-message strong {
+  font-weight: 600;
+  color: #f5f5f7;
+}
+
+.prose-message a {
+  color: #0a84ff;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.prose-message table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+.prose-message th, .prose-message td {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.prose-message th {
+  background: rgba(255, 255, 255, 0.04);
+  font-weight: 600;
+}
+
+/* ─── Glow effect ──────────────────────────────────── */
+.glow-accent {
+  box-shadow: 0 0 24px rgba(10, 132, 255, 0.12);
+}

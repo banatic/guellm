@@ -72,7 +72,7 @@ export default function ToolCallCard({ tool }: Props) {
       initial={{ opacity: 0, y: 4 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.15 }}
-      className={`my-1.5 rounded-lg border transition-colors ${
+      className={`my-2 rounded-xl border transition-all duration-200 shadow-card ${
         tool.status === "pending"
           ? "border-warning/30 bg-warning/[0.06]"
           : tool.status === "running"
@@ -84,9 +84,14 @@ export default function ToolCallCard({ tool }: Props) {
           : "border-white/[0.06] bg-white/[0.02]"
       }`}
     >
+      {/* Running shimmer bar */}
+      {tool.status === "running" && (
+        <div className="h-[2px] w-full rounded-t-xl shimmer-bar" />
+      )}
+
       <button
         onClick={() => setExpanded((e) => !e)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-left"
+        className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
       >
         <span className="text-text-tertiary">{icon}</span>
         <div className="flex-1 min-w-0">
@@ -118,20 +123,22 @@ export default function ToolCallCard({ tool }: Props) {
             transition={{ duration: 0.15 }}
             className="overflow-hidden"
           >
-            <div className="px-3 pb-2.5 space-y-2 border-t border-white/[0.04] pt-2">
+            <div className="px-3 pb-3 space-y-2.5 border-t border-white/[0.04] pt-2.5">
               {Object.keys(tool.args).length > 0 && (
                 <div>
-                  <div className="text-[10px] text-text-tertiary mb-1 font-medium">입력</div>
-                  <pre className="font-mono text-[11px] text-text-secondary bg-black/20 rounded-md p-2 overflow-x-auto whitespace-pre-wrap break-all max-h-32">
+                  <div className="text-[10px] text-text-tertiary mb-1.5 font-medium uppercase tracking-wider">
+                    입력
+                  </div>
+                  <pre className="font-mono text-[11px] text-text-secondary bg-black/25 rounded-lg p-2.5 overflow-x-auto whitespace-pre-wrap break-all max-h-32 border border-white/[0.03]">
                     {JSON.stringify(tool.args, null, 2)}
                   </pre>
                 </div>
               )}
 
-              {/* Human-in-the-Loop: 승인/거부 버튼 */}
+              {/* Human-in-the-Loop */}
               {tool.status === "pending" && (
-                <div className="flex items-center gap-2 py-1">
-                  <span className="text-[11px] text-warning font-medium flex-1">
+                <div className="flex items-center gap-2.5 py-1.5">
+                  <span className="text-[12px] text-warning font-medium flex-1">
                     이 도구를 실행할까요?
                   </span>
                   <button
@@ -139,9 +146,9 @@ export default function ToolCallCard({ tool }: Props) {
                       e.stopPropagation();
                       handleConfirm(true);
                     }}
-                    className="flex items-center gap-1 px-3 py-1.5 rounded-md text-[11px] font-medium text-white bg-success/80 hover:bg-success transition-colors"
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-[12px] font-medium text-white bg-success/80 hover:bg-success hover:scale-[1.02] active:scale-[0.98] transition-all duration-150"
                   >
-                    <ShieldCheck size={12} />
+                    <ShieldCheck size={13} />
                     승인
                   </button>
                   <button
@@ -149,9 +156,9 @@ export default function ToolCallCard({ tool }: Props) {
                       e.stopPropagation();
                       handleConfirm(false);
                     }}
-                    className="flex items-center gap-1 px-3 py-1.5 rounded-md text-[11px] font-medium text-white bg-error/80 hover:bg-error transition-colors"
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-[12px] font-medium text-white bg-error/80 hover:bg-error hover:scale-[1.02] active:scale-[0.98] transition-all duration-150"
                   >
-                    <ShieldX size={12} />
+                    <ShieldX size={13} />
                     거부
                   </button>
                 </div>
@@ -159,12 +166,14 @@ export default function ToolCallCard({ tool }: Props) {
 
               {tool.result && (
                 <div>
-                  <div className="text-[10px] text-text-tertiary mb-1 font-medium">결과</div>
+                  <div className="text-[10px] text-text-tertiary mb-1.5 font-medium uppercase tracking-wider">
+                    결과
+                  </div>
                   <pre
-                    className={`font-mono text-[11px] rounded-md p-2 overflow-x-auto whitespace-pre-wrap break-all max-h-48 ${
+                    className={`font-mono text-[11px] rounded-lg p-2.5 overflow-x-auto whitespace-pre-wrap break-all max-h-48 border ${
                       tool.status === "error"
-                        ? "bg-error/[0.06] text-error"
-                        : "bg-black/20 text-success"
+                        ? "bg-error/[0.06] text-error border-error/10"
+                        : "bg-black/25 text-success border-white/[0.03]"
                     }`}
                   >
                     {tool.result}
@@ -172,13 +181,15 @@ export default function ToolCallCard({ tool }: Props) {
                 </div>
               )}
               {tool.status === "running" && !tool.result && (
-                <div className="flex items-center gap-2 py-1">
+                <div className="flex items-center gap-2 py-1.5">
                   <span className="flex gap-0.5">
                     <span className="typing-dot" />
                     <span className="typing-dot" />
                     <span className="typing-dot" />
                   </span>
-                  <span className="text-[11px] text-text-tertiary">실행 중...</span>
+                  <span className="text-[11px] text-text-tertiary">
+                    실행 중...
+                  </span>
                 </div>
               )}
             </div>

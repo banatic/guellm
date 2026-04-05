@@ -1,4 +1,7 @@
 import { motion } from "framer-motion";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { Bot } from "lucide-react";
 import type { Message } from "../types";
 import ToolCallCard from "./ToolCallCard";
 
@@ -8,62 +11,22 @@ interface Props {
 
 function TypingIndicator() {
   return (
-    <div className="flex items-center gap-1.5 py-1">
-      <span className="typing-dot" />
-      <span className="typing-dot" />
-      <span className="typing-dot" />
+    <div className="flex items-center gap-2 py-1.5">
+      <span className="flex gap-1">
+        <span className="typing-dot" />
+        <span className="typing-dot" />
+        <span className="typing-dot" />
+      </span>
+      <span className="text-[12px] text-text-tertiary">생각하는 중...</span>
     </div>
   );
 }
 
 function TextContent({ text }: { text: string }) {
-  const paragraphs = text.split("\n\n").filter(Boolean);
   return (
-    <div>
-      {paragraphs.map((para, i) => {
-        if (para.startsWith("```")) {
-          const lines = para.split("\n");
-          const code = lines.slice(1, -1).join("\n");
-          return (
-            <pre key={i} className="bg-black/30 rounded-lg p-3 my-2 overflow-x-auto">
-              <code className="font-mono text-[12px] text-text-secondary">{code}</code>
-            </pre>
-          );
-        }
-        if (para.startsWith("## ")) {
-          return (
-            <p key={i} className="font-semibold text-text text-[14px] mt-3 mb-1">
-              {para.slice(3)}
-            </p>
-          );
-        }
-        if (para.startsWith("# ")) {
-          return (
-            <p key={i} className="font-semibold text-text text-[15px] mt-3 mb-1">
-              {para.slice(2)}
-            </p>
-          );
-        }
-        return (
-          <p key={i} className="text-[14px] leading-[1.6] text-text mb-1.5 last:mb-0">
-            {renderInline(para)}
-          </p>
-        );
-      })}
+    <div className="prose-message">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
     </div>
-  );
-}
-
-function renderInline(text: string): React.ReactNode {
-  const parts = text.split(/(`[^`]+`)/g);
-  return parts.map((part, i) =>
-    part.startsWith("`") && part.endsWith("`") ? (
-      <code key={i} className="font-mono text-[0.85em] bg-white/[0.06] rounded px-1 py-0.5 text-accent">
-        {part.slice(1, -1)}
-      </code>
-    ) : (
-      <span key={i}>{part}</span>
-    )
   );
 }
 
@@ -73,17 +36,26 @@ export default function MessageBubble({ message }: Props) {
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 6 }}
+      initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2, ease: "easeOut" }}
+      transition={{ duration: 0.25, ease: "easeOut" }}
       className={`flex gap-3 ${isUser ? "justify-end" : "justify-start"}`}
     >
-      <div className={`max-w-[80%] ${isUser ? "items-end" : "items-start"} flex flex-col gap-0.5`}>
+      {/* Assistant avatar */}
+      {!isUser && (
+        <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-accent/20 to-accent/5 border border-accent/10 flex items-center justify-center shrink-0 mt-0.5">
+          <Bot size={14} className="text-accent" />
+        </div>
+      )}
+
+      <div
+        className={`max-w-[80%] ${isUser ? "items-end" : "items-start"} flex flex-col gap-1`}
+      >
         <div
-          className={`px-4 py-2.5 ${
+          className={`px-4 py-3 ${
             isUser
-              ? "bg-accent text-white rounded-[18px] rounded-br-md"
-              : "bg-white/[0.04] border border-white/[0.06] text-text rounded-[18px] rounded-bl-md"
+              ? "bg-gradient-to-br from-accent to-blue-600 text-white rounded-2xl rounded-br-md shadow-glow"
+              : "bg-white/[0.06] border border-white/[0.07] text-text rounded-2xl rounded-bl-md shadow-card"
           }`}
         >
           {isEmpty && !isUser ? (
@@ -98,7 +70,10 @@ export default function MessageBubble({ message }: Props) {
               }
               if (content.type === "thinking") {
                 return (
-                  <div key={i} className="text-text-tertiary text-[12px] italic flex items-center gap-2">
+                  <div
+                    key={i}
+                    className="text-text-tertiary text-[12px] italic flex items-center gap-2"
+                  >
                     <span className="flex gap-0.5">
                       <span className="typing-dot" />
                       <span className="typing-dot" />
@@ -113,7 +88,9 @@ export default function MessageBubble({ message }: Props) {
           )}
         </div>
 
-        <span className={`text-[10px] text-text-tertiary px-2 ${isUser ? "text-right" : "text-left"}`}>
+        <span
+          className={`text-[10px] text-text-tertiary/60 px-2 ${isUser ? "text-right" : "text-left"}`}
+        >
           {new Date(message.timestamp).toLocaleTimeString("ko-KR", {
             hour: "2-digit",
             minute: "2-digit",

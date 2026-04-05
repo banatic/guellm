@@ -41,9 +41,25 @@ export default {
           from: { transform: "rotate(0deg)" },
           to: { transform: "rotate(360deg)" },
         },
+        shimmer: {
+          "0%": { backgroundPosition: "-200% 0" },
+          "100%": { backgroundPosition: "200% 0" },
+        },
+        "glow-pulse": {
+          "0%, 100%": { opacity: "0.4" },
+          "50%": { opacity: "0.8" },
+        },
       },
       animation: {
         "fade-in": "fade-in 0.2s ease-out",
+        shimmer: "shimmer 2s linear infinite",
+        "glow-pulse": "glow-pulse 2s ease-in-out infinite",
+      },
+      boxShadow: {
+        glow: "0 0 20px rgba(10, 132, 255, 0.15)",
+        "glow-lg": "0 0 40px rgba(10, 132, 255, 0.2)",
+        card: "0 2px 8px rgba(0, 0, 0, 0.2)",
+        "card-hover": "0 4px 16px rgba(0, 0, 0, 0.3)",
       },
     },
   },

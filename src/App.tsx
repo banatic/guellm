@@ -26,26 +26,26 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-bg">
       {/* Title bar */}
-      <div className="drag-region flex items-center justify-between px-4 h-11 shrink-0 bg-[#161617] border-b border-white/[0.06]">
-        <span className="text-[13px] font-medium text-text-secondary tracking-tight">
-          굴림 (guellm)
+      <div className="drag-region flex items-center justify-between px-4 h-11 shrink-0 bg-[#141415] border-b border-white/[0.06]">
+        <span className="text-[13px] font-semibold text-text-secondary tracking-tight">
+          굴림 <span className="text-text-tertiary font-normal">(guellm)</span>
         </span>
-        <div className="no-drag flex items-center">
+        <div className="no-drag flex items-center gap-0.5">
           <button
             onClick={minimize}
-            className="w-8 h-8 flex items-center justify-center rounded-md hover:bg-white/[0.06] text-text-tertiary hover:text-text-secondary transition-colors"
+            className="w-8 h-8 flex items-center justify-center rounded-md hover:bg-white/[0.08] text-text-tertiary hover:text-text-secondary transition-all duration-150"
           >
             <Minus size={13} />
           </button>
           <button
             onClick={toggleMax}
-            className="w-8 h-8 flex items-center justify-center rounded-md hover:bg-white/[0.06] text-text-tertiary hover:text-text-secondary transition-colors"
+            className="w-8 h-8 flex items-center justify-center rounded-md hover:bg-white/[0.08] text-text-tertiary hover:text-text-secondary transition-all duration-150"
           >
             <Square size={11} />
           </button>
           <button
             onClick={close}
-            className="w-8 h-8 flex items-center justify-center rounded-md hover:bg-error/20 text-text-tertiary hover:text-error transition-colors"
+            className="w-8 h-8 flex items-center justify-center rounded-md hover:bg-error/20 text-text-tertiary hover:text-error transition-all duration-150"
           >
             <X size={13} />
           </button>
@@ -58,7 +58,7 @@ export default function App() {
           collapsed={sidebarCollapsed}
           onToggle={() => setSidebarCollapsed((c) => !c)}
         />
-        <div className="flex-1 min-w-0 flex flex-col overflow-hidden bg-[#232325]">
+        <div className="flex-1 min-w-0 flex flex-col overflow-hidden bg-[#212123]">
           <ChatInterface />
         </div>
       </div>

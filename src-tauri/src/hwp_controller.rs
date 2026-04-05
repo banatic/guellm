@@ -434,7 +434,8 @@ impl HwpController {
     // ─────────────── 표 스캔 (테이블 네비게이션) ─────────────
 
     /// 문서의 모든 표를 순회하며 구조를 읽어옵니다.
-    /// 각 표: { rows, cols, cells: [[text, ...], ...] }
+    /// 전략: 문단 단위 이동 + KeyIndicator(VT_BYREF)로 표 진입 감지 +
+    ///        GetPos(VT_BYREF)로 커서 위치 비교하여 이동/탈출 판단
     fn scan_tables(&self) -> anyhow::Result<Vec<TableData>> {
         let hwp = self.hwp()?;
         let mut tables = Vec::new();
@@ -442,71 +443,66 @@ impl HwpController {
         // 문서 처음으로 이동
         hwp.call("Run", vec![Variant::String("MoveDocBegin".to_string())])?;
 
-        // 표를 순차적으로 찾아간다
-        loop {
-            // 현재 위치에서 다음 표를 찾음
-            // ShapeObjTableSelAll: 현재 커서가 표 안이면 표 전체 선택
-            // 커서가 표 밖이면 Ctrl 기반으로 다음 표로 이동해야 함
-            //
-            // 전략: MoveNextParaBegin을 반복하면서 KeyIndicator로 표 진입을 감지
-            // 또는 직접 표에 진입: Ctrl + 표 진입 방식
+        let mut iteration = 0;
+        let max_iterations = 10000; // 안전 제한
 
-            // 현재 위치가 표인지 확인
-            let in_table = self.is_cursor_in_table()?;
-            if in_table {
-                // 이미 표 안에 있으면 읽기
+        loop {
+            if iteration >= max_iterations {
+                eprintln!("[scan_tables] 최대 반복 횟수 도달, 중단");
+                break;
+            }
+            iteration += 1;
+
+            // 현재 위치가 표 안인지 확인 (KeyIndicator ctrlname 기반)
+            if self.is_cursor_in_table()? {
                 if let Ok(table) = self.read_current_table() {
-                    tables.push(table);
+                    if table.rows > 0 && table.cols > 0 {
+                        tables.push(table);
+                    }
                 }
-                // 표 밖으로 나가기
-                hwp.call("Run", vec![Variant::String("MoveNextParaBegin".to_string())])?;
-                hwp.call("Run", vec![Variant::String("MoveNextParaBegin".to_string())])?;
+                // 표 밖으로 나가기: 위치 비교 + KeyIndicator로 확인
+                for _ in 0..500 {
+                    let pos_before = self.get_cursor_pos();
+                    let _ = hwp.call("Run", vec![Variant::String("MoveNextParaBegin".to_string())]);
+                    let pos_after = self.get_cursor_pos();
+                    if pos_after == pos_before {
+                        break; // 문서 끝
+                    }
+                    if !self.is_cursor_in_table()? {
+                        break; // 표 탈출 성공
+                    }
+                }
                 continue;
             }
 
-            // 다음 표를 찾기: Ctrl(표 객체)을 이용
-            // HWP에서는 표 진입을 위해 표 위에서 Enter 또는 표를 클릭
-            // 프로그래밍적으로는: 다음 컨트롤(표/이미지 등)로 이동 후 표인지 확인
-            let moved = hwp
-                .call("Run", vec![Variant::String("MoveNextParaBegin".to_string())])
-                .ok()
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            // 다음 문단으로 이동 (위치 비교로 이동 감지 — Run 반환값에 의존하지 않음)
+            let pos_before = self.get_cursor_pos();
+            let _ = hwp.call("Run", vec![Variant::String("MoveNextParaBegin".to_string())]);
+            let pos_after = self.get_cursor_pos();
 
-            if !moved {
+            if pos_after == pos_before {
                 break; // 문서 끝
             }
-
-            // 이동 후 표 안인지 확인
-            if self.is_cursor_in_table()? {
-                if let Ok(table) = self.read_current_table() {
-                    tables.push(table);
-                }
-                // 표 밖으로
-                hwp.call("Run", vec![Variant::String("MoveNextParaBegin".to_string())])?;
-                hwp.call("Run", vec![Variant::String("MoveNextParaBegin".to_string())])?;
-            }
         }
-
-        // scan_tables가 비었으면 대체 방법: GetTextFile("UNICODE")에서 표 카운트
-        // (이미 위에서 네비게이션으로 탐색했으므로 보통 여기까지 오지 않음)
 
         Ok(tables)
     }
 
-    /// KeyIndicator로 현재 커서가 표 안에 있는지 확인
+    /// KeyIndicator의 ctrlname으로 현재 커서가 표 안에 있는지 확인합니다.
+    /// VT_BYREF output 파라미터를 통해 ctrlname을 가져옵니다.
     fn is_cursor_in_table(&self) -> anyhow::Result<bool> {
         let hwp = self.hwp()?;
-        // KeyIndicator 반환: (seccnt, secno, prgcnt, prgno, colcnt, colno, line, pos, over, ctrlname)
-        // ctrlname이 "표"이면 표 안에 있음
-        match hwp.call("KeyIndicator", vec![]) {
-            Ok(result) => {
-                let repr = result.to_string_repr();
-                // KeyIndicator가 반환하는 형태에 따라 파싱
-                // 일반적으로 컨트롤 이름이 포함됨
-                Ok(repr.contains("표") || repr.contains("table") || repr.contains("Table"))
+        match hwp.key_indicator() {
+            Ok(ctrl_name) => {
+                let result = ctrl_name.contains("표")
+                    || ctrl_name.contains("table")
+                    || ctrl_name.contains("Table");
+                Ok(result)
             }
-            Err(_) => Ok(false),
+            Err(e) => {
+                eprintln!("[is_cursor_in_table] KeyIndicator 실패: {e}");
+                Ok(false)
+            }
         }
     }
 
@@ -584,20 +580,13 @@ impl HwpController {
     }
 
     /// 커서 위치를 (list, para, pos) 튜플로 반환
+    /// VT_BYREF output 파라미터를 통해 정확한 위치를 가져옵니다.
     fn get_cursor_pos(&self) -> (i32, i32, i32) {
         let hwp = match self.hwp() {
             Ok(h) => h,
             Err(_) => return (-1, -1, -1),
         };
-        // GetPos returns (list, para, pos)
-        match hwp.call("GetPos", vec![]) {
-            Ok(v) => {
-                let repr = v.to_string_repr();
-                // 반환 형태에 따라 파싱: "(list, para, pos)" 또는 개별 값
-                parse_pos_tuple(&repr)
-            }
-            Err(_) => (-1, -1, -1),
-        }
+        hwp.get_pos().unwrap_or((-1, -1, -1))
     }
 
     fn get_all_tables_overview(&self) -> anyhow::Result<Value> {
@@ -1429,19 +1418,3 @@ fn parse_gettext_result(variant: &Variant, repr: &str) -> (i32, String) {
     (1, repr.to_string())
 }
 
-/// GetPos 반환값에서 (list, para, pos) 추출
-fn parse_pos_tuple(repr: &str) -> (i32, i32, i32) {
-    let trimmed = repr.trim().trim_start_matches('(').trim_end_matches(')');
-    let parts: Vec<&str> = trimmed.split(',').collect();
-    if parts.len() >= 3 {
-        let a = parts[0].trim().parse().unwrap_or(-1);
-        let b = parts[1].trim().parse().unwrap_or(-1);
-        let c = parts[2].trim().parse().unwrap_or(-1);
-        (a, b, c)
-    } else if parts.len() == 1 {
-        let a = parts[0].trim().parse().unwrap_or(-1);
-        (a, -1, -1)
-    } else {
-        (-1, -1, -1)
-    }
-}

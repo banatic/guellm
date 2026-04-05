@@ -10,16 +10,14 @@ import {
   X,
   Plug,
   Loader2,
-  Check,
   Eye,
+  Sparkles,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "../store/useAppStore";
 import type { AgentEvent } from "../types";
 import MessageBubble from "./MessageBubble";
-
-const PLACEHOLDER = "메시지를 입력하세요... (Ctrl+Enter)";
 
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -80,7 +78,6 @@ export default function ChatInterface() {
       if (path) {
         setSelectedFile(path);
         setConnected(false);
-        // 대화가 없으면 새로 생성
         if (!activeConversationId) {
           createConversation(path);
         }
@@ -255,20 +252,19 @@ export default function ChatInterface() {
     : null;
 
   const isReady = isConnected && !isAgentRunning && query.trim().length > 0;
-  const hasConversation = activeConversationId !== null;
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full relative">
       {/* Top bar - file info */}
       {selectedFile && (
-        <div className="shrink-0 px-6 py-2 border-b border-white/[0.06] flex items-center gap-3">
-          <div className="flex items-center gap-2 flex-1 min-w-0">
-            <FileText size={13} className="text-accent shrink-0" />
-            <span className="text-[12px] text-text-secondary truncate">
+        <div className="shrink-0 px-6 py-2.5 border-b border-white/[0.06] flex items-center gap-3 bg-white/[0.02]">
+          <div className="flex items-center gap-2.5 flex-1 min-w-0">
+            <FileText size={14} className="text-accent shrink-0" />
+            <span className="text-[13px] text-text-secondary truncate">
               {filename}
             </span>
             <div
-              className={`flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] ${
+              className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium ${
                 isConnected
                   ? "bg-success/10 text-success"
                   : "bg-white/[0.04] text-text-tertiary"
@@ -276,7 +272,7 @@ export default function ChatInterface() {
             >
               <div
                 className={`w-1.5 h-1.5 rounded-full ${
-                  isConnected ? "bg-success" : "bg-text-tertiary"
+                  isConnected ? "bg-success animate-pulse" : "bg-text-tertiary"
                 }`}
               />
               {isConnected ? "연결됨" : "미연결"}
@@ -287,12 +283,12 @@ export default function ChatInterface() {
               <button
                 onClick={handleConnect}
                 disabled={isConnecting}
-                className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium bg-accent text-white hover:bg-accent-hover transition-colors disabled:opacity-50"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-accent text-white hover:bg-accent-hover hover:scale-[1.02] active:scale-[0.98] transition-all duration-150 disabled:opacity-50"
               >
                 {isConnecting ? (
-                  <Loader2 size={11} className="animate-spin" />
+                  <Loader2 size={12} className="animate-spin" />
                 ) : (
-                  <Plug size={11} />
+                  <Plug size={12} />
                 )}
                 {isConnecting ? "연결 중" : "열기"}
               </button>
@@ -300,9 +296,9 @@ export default function ChatInterface() {
             {isConnected && (
               <button
                 onClick={handlePreview}
-                className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] text-text-tertiary hover:text-text-secondary hover:bg-white/[0.05] transition-colors"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] text-text-tertiary hover:text-text-secondary hover:bg-white/[0.06] transition-all duration-150"
               >
-                <Eye size={11} />
+                <Eye size={12} />
                 구조
               </button>
             )}
@@ -319,13 +315,13 @@ export default function ChatInterface() {
             exit={{ opacity: 0, height: 0 }}
             className="shrink-0 overflow-hidden border-b border-white/[0.06]"
           >
-            <div className="relative px-6 py-3 bg-black/20 max-h-48 overflow-y-auto">
-              <pre className="font-mono text-[10px] text-text-secondary">
+            <div className="relative px-6 py-3 bg-black/30 max-h-48 overflow-y-auto backdrop-blur-sm">
+              <pre className="font-mono text-[11px] text-text-secondary leading-relaxed">
                 {previewResult}
               </pre>
               <button
                 onClick={() => setPreviewResult(null)}
-                className="absolute top-2 right-4 w-6 h-6 flex items-center justify-center rounded text-text-tertiary hover:text-text hover:bg-white/10"
+                className="absolute top-2 right-4 w-7 h-7 flex items-center justify-center rounded-lg text-text-tertiary hover:text-text hover:bg-white/10 transition-all duration-150"
               >
                 <X size={12} />
               </button>
@@ -335,8 +331,11 @@ export default function ChatInterface() {
       </AnimatePresence>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto">
-        <div className="max-w-3xl mx-auto px-6 py-5">
+      <div className="flex-1 overflow-y-auto relative">
+        {/* Top fade */}
+        <div className="sticky top-0 h-6 bg-gradient-to-b from-[#212123] to-transparent z-10 pointer-events-none" />
+
+        <div className="max-w-3xl mx-auto px-6 py-3">
           <AnimatePresence initial={false}>
             {messages.length === 0 ? (
               <motion.div
@@ -344,57 +343,62 @@ export default function ChatInterface() {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                className="flex flex-col items-center justify-center min-h-[60vh] text-center"
+                className="flex flex-col items-center justify-center min-h-[55vh] text-center"
               >
-                <div className="w-12 h-12 rounded-2xl bg-accent/10 flex items-center justify-center mb-4">
-                  <FileText size={22} className="text-accent" />
+                {/* Glow icon */}
+                <div className="relative mb-6">
+                  <div className="absolute inset-0 w-16 h-16 rounded-2xl bg-accent/20 blur-xl animate-glow-pulse" />
+                  <div className="relative w-16 h-16 rounded-2xl bg-gradient-to-br from-accent/20 to-accent/5 border border-accent/15 flex items-center justify-center">
+                    <Sparkles size={26} className="text-accent" />
+                  </div>
                 </div>
-                <h3 className="text-text text-[18px] font-semibold mb-2">
+
+                <h3 className="text-text text-[20px] font-semibold mb-2 tracking-tight">
                   HWP AI 에이전트
                 </h3>
                 {!selectedFile ? (
                   <>
-                    <p className="text-text-secondary text-[13px] max-w-sm leading-relaxed mb-5">
+                    <p className="text-text-secondary text-[14px] max-w-sm leading-relaxed mb-6">
                       HWP 파일을 열고 AI에게 편집을 요청하세요.
                     </p>
                     <button
                       onClick={handleFileOpen}
-                      className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-[13px] font-medium bg-accent text-white hover:bg-accent-hover transition-colors"
+                      className="flex items-center gap-2 px-6 py-3 rounded-xl text-[14px] font-medium bg-gradient-to-r from-accent to-blue-600 text-white hover:scale-[1.03] active:scale-[0.98] transition-all duration-200 shadow-glow"
                     >
-                      <Paperclip size={14} />
+                      <Paperclip size={15} />
                       파일 열기
                     </button>
                   </>
                 ) : !isConnected ? (
                   <>
-                    <p className="text-text-secondary text-[13px] max-w-sm leading-relaxed mb-1">
+                    <p className="text-text-secondary text-[14px] max-w-sm leading-relaxed mb-1">
                       <span className="text-accent font-medium">
                         {filename}
-                      </span>
-                      이(가) 선택되었습니다.
+                      </span>{" "}
+                      선택됨
                     </p>
-                    <p className="text-text-tertiary text-[12px] mb-5">
+                    <p className="text-text-tertiary text-[13px] mb-6">
                       한글에서 문서를 열어 연결하세요.
                     </p>
                     <button
                       onClick={handleConnect}
                       disabled={isConnecting}
-                      className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-[13px] font-medium bg-accent text-white hover:bg-accent-hover transition-colors disabled:opacity-50"
+                      className="flex items-center gap-2 px-6 py-3 rounded-xl text-[14px] font-medium bg-gradient-to-r from-accent to-blue-600 text-white hover:scale-[1.03] active:scale-[0.98] transition-all duration-200 shadow-glow disabled:opacity-50 disabled:hover:scale-100"
                     >
                       {isConnecting ? (
-                        <Loader2 size={14} className="animate-spin" />
+                        <Loader2 size={15} className="animate-spin" />
                       ) : (
-                        <Plug size={14} />
+                        <Plug size={15} />
                       )}
                       {isConnecting ? "연결 중..." : "한글에서 열기"}
                     </button>
                   </>
                 ) : (
                   <>
-                    <p className="text-text-secondary text-[13px] max-w-sm leading-relaxed mb-5">
+                    <p className="text-text-secondary text-[14px] max-w-sm leading-relaxed mb-6">
                       문서가 연결되었습니다. 아래에 편집 요청을 입력하세요.
                     </p>
-                    <div className="flex flex-wrap gap-2 justify-center max-w-sm">
+                    <div className="flex flex-wrap gap-2.5 justify-center max-w-md">
                       {[
                         "표 구조 분석해줘",
                         "첫 번째 표 헤더 확인",
@@ -403,7 +407,7 @@ export default function ChatInterface() {
                         <button
                           key={hint}
                           onClick={() => setQuery(hint)}
-                          className="px-3.5 py-1.5 rounded-full text-[12px] text-text-secondary bg-white/[0.04] border border-white/[0.06] hover:bg-white/[0.07] transition-colors"
+                          className="px-4 py-2 rounded-xl text-[13px] text-text-secondary bg-white/[0.04] border border-white/[0.07] hover:bg-white/[0.08] hover:border-white/[0.12] hover:-translate-y-0.5 transition-all duration-200"
                         >
                           {hint}
                         </button>
@@ -417,11 +421,38 @@ export default function ChatInterface() {
                 {messages.map((msg) => (
                   <MessageBubble key={msg.id} message={msg} />
                 ))}
+
+                {/* Processing status - in chat area */}
+                {isAgentRunning && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="flex items-center gap-3 px-4 py-2.5 rounded-xl bg-accent/[0.06] border border-accent/10 max-w-fit"
+                  >
+                    <Loader2
+                      size={14}
+                      className="text-accent animate-spin"
+                    />
+                    <span className="text-[13px] text-accent/80">
+                      처리 중...
+                    </span>
+                    <button
+                      onClick={handleCancel}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium text-error/70 hover:text-error bg-error/[0.06] hover:bg-error/[0.12] transition-all duration-150"
+                    >
+                      <XCircle size={12} />
+                      중단
+                    </button>
+                  </motion.div>
+                )}
               </div>
             )}
           </AnimatePresence>
           <div ref={messagesEndRef} />
         </div>
+
+        {/* Bottom fade */}
+        <div className="sticky bottom-0 h-6 bg-gradient-to-t from-[#212123] to-transparent pointer-events-none" />
       </div>
 
       {/* Input area */}
@@ -430,87 +461,63 @@ export default function ChatInterface() {
           {/* File badge */}
           {selectedFile && !isConnected && messages.length > 0 && (
             <div className="flex items-center gap-2 mb-2 px-1">
-              <span className="text-[11px] text-warning">
+              <span className="text-[12px] text-warning">
                 문서 연결이 필요합니다
               </span>
               <button
                 onClick={handleConnect}
                 disabled={isConnecting}
-                className="text-[11px] text-accent hover:underline"
+                className="text-[12px] text-accent hover:underline"
               >
                 연결하기
               </button>
             </div>
           )}
 
-          <div className="bg-white/[0.04] border border-white/[0.06] rounded-2xl focus-within:border-accent/40 transition-colors">
+          <div className="bg-white/[0.05] border border-white/[0.08] rounded-2xl focus-within:border-accent/40 focus-within:shadow-glow transition-all duration-200 backdrop-blur-sm">
             <textarea
               ref={textareaRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={PLACEHOLDER}
+              placeholder="메시지를 입력하세요... (Ctrl+Enter)"
               disabled={isAgentRunning}
               rows={1}
-              className="w-full bg-transparent resize-none border-none outline-none px-4 pt-3 pb-1 text-[14px] text-text placeholder:text-text-tertiary leading-relaxed disabled:opacity-40"
-              style={{ minHeight: "40px" }}
+              className="w-full bg-transparent resize-none border-none outline-none px-4 pt-3.5 pb-1.5 text-[14px] text-text placeholder:text-text-tertiary leading-relaxed disabled:opacity-40"
+              style={{ minHeight: "44px" }}
             />
-            <div className="flex items-center justify-between px-3 pb-2.5">
+            <div className="flex items-center justify-between px-3 pb-3">
               <div className="flex items-center gap-2">
-                {/* File attach */}
                 <button
                   onClick={handleFileOpen}
                   disabled={isAgentRunning}
-                  className="w-8 h-8 flex items-center justify-center rounded-lg text-text-tertiary hover:text-text-secondary hover:bg-white/[0.05] transition-colors disabled:opacity-30"
+                  className="w-8 h-8 flex items-center justify-center rounded-lg text-text-tertiary hover:text-text-secondary hover:bg-white/[0.06] transition-all duration-150 disabled:opacity-30"
                   title="파일 열기"
                 >
                   <Paperclip size={15} />
                 </button>
 
-                {isAgentRunning ? (
-                  <div className="flex items-center gap-2">
-                    <span className="flex items-center gap-1.5 text-[12px] text-text-tertiary">
-                      <span className="flex gap-0.5">
-                        <span className="typing-dot" />
-                        <span className="typing-dot" />
-                        <span className="typing-dot" />
-                      </span>
-                      처리 중
-                    </span>
-                    <button
-                      onClick={handleCancel}
-                      className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] text-error/80 hover:text-error bg-error/[0.06] hover:bg-error/[0.12] transition-colors"
-                      title="에이전트 중단"
-                    >
-                      <XCircle size={12} />
-                      중단
-                    </button>
-                  </div>
-                ) : (
-                  <>
-                    {tokenUsage && (
-                      <span className="text-[10px] text-text-tertiary/60 font-mono">
-                        {formatTokens(tokenUsage.total)} tokens
-                      </span>
-                    )}
-                  </>
+                {tokenUsage && !isAgentRunning && (
+                  <span className="text-[11px] text-text-tertiary/50 font-mono">
+                    {formatTokens(tokenUsage.total)} tokens
+                  </span>
                 )}
               </div>
               <div className="flex items-center gap-1.5">
                 {hasBackup && !isAgentRunning && (
                   <button
                     onClick={handleRollback}
-                    className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] text-warning hover:bg-warning/[0.08] transition-colors"
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[12px] text-warning hover:bg-warning/[0.08] transition-all duration-150"
                     title="마지막 에이전트 실행 전으로 되돌리기"
                   >
-                    <Undo2 size={12} />
+                    <Undo2 size={13} />
                     되돌리기
                   </button>
                 )}
                 {messages.length > 0 && !isAgentRunning && (
                   <button
                     onClick={clearMessages}
-                    className="w-8 h-8 flex items-center justify-center rounded-lg text-text-tertiary hover:text-error hover:bg-white/[0.05] transition-colors"
+                    className="w-8 h-8 flex items-center justify-center rounded-lg text-text-tertiary hover:text-error hover:bg-white/[0.06] transition-all duration-150"
                     title="대화 초기화"
                   >
                     <Trash2 size={14} />
@@ -519,9 +526,9 @@ export default function ChatInterface() {
                 <button
                   onClick={handleSubmit}
                   disabled={!isReady}
-                  className="w-8 h-8 flex items-center justify-center rounded-xl bg-accent text-white hover:bg-accent-hover transition-colors disabled:opacity-25 disabled:cursor-default"
+                  className="w-9 h-9 flex items-center justify-center rounded-xl bg-gradient-to-r from-accent to-blue-600 text-white hover:scale-[1.05] active:scale-[0.95] transition-all duration-150 disabled:opacity-20 disabled:hover:scale-100 disabled:cursor-default shadow-glow"
                 >
-                  <ArrowUp size={16} strokeWidth={2.5} />
+                  <ArrowUp size={17} strokeWidth={2.5} />
                 </button>
               </div>
             </div>
