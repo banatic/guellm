@@ -5,6 +5,7 @@ export interface AppConfig {
   last_provider: string;
   last_model: string;
   last_file: string | null;
+  zoom?: number;
 }
 
 export type MessageRole = "user" | "assistant" | "system";

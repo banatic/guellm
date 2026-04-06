@@ -11,7 +11,6 @@ import {
   Plug,
   Loader2,
   Eye,
-  Sparkles,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -283,7 +282,7 @@ export default function ChatInterface() {
               <button
                 onClick={handleConnect}
                 disabled={isConnecting}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-accent text-white hover:bg-accent-hover hover:scale-[1.02] active:scale-[0.98] transition-all duration-150 disabled:opacity-50"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-accent text-white hover:bg-accent-hover active:scale-[0.98] transition-all duration-150 disabled:opacity-50"
               >
                 {isConnecting ? (
                   <Loader2 size={12} className="animate-spin" />
@@ -338,104 +337,72 @@ export default function ChatInterface() {
         <div className="max-w-3xl mx-auto px-6 py-3">
           <AnimatePresence initial={false}>
             {messages.length === 0 ? (
-              <motion.div
+              <div
                 key="empty"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
                 className="flex flex-col items-center justify-center min-h-[55vh] text-center"
               >
-                {/* Glow icon */}
-                <div className="relative mb-6">
-                  <div className="absolute inset-0 w-16 h-16 rounded-2xl bg-accent/20 blur-xl animate-glow-pulse" />
-                  <div className="relative w-16 h-16 rounded-2xl bg-gradient-to-br from-accent/20 to-accent/5 border border-accent/15 flex items-center justify-center">
-                    <Sparkles size={26} className="text-accent" />
-                  </div>
-                </div>
-
-                <h3 className="text-text text-[20px] font-semibold mb-2 tracking-tight">
-                  HWP AI 에이전트
-                </h3>
                 {!selectedFile ? (
-                  <>
-                    <p className="text-text-secondary text-[14px] max-w-sm leading-relaxed mb-6">
-                      HWP 파일을 열고 AI에게 편집을 요청하세요.
-                    </p>
-                    <button
-                      onClick={handleFileOpen}
-                      className="flex items-center gap-2 px-6 py-3 rounded-xl text-[14px] font-medium bg-gradient-to-r from-accent to-blue-600 text-white hover:scale-[1.03] active:scale-[0.98] transition-all duration-200 shadow-glow"
-                    >
-                      <Paperclip size={15} />
-                      파일 열기
-                    </button>
-                  </>
+                  <button
+                    onClick={handleFileOpen}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg text-[13px] text-text-secondary bg-white/[0.05] border border-white/[0.08] hover:bg-white/[0.08] transition-colors duration-150"
+                  >
+                    <Paperclip size={13} />
+                    파일 열기
+                  </button>
                 ) : !isConnected ? (
                   <>
-                    <p className="text-text-secondary text-[14px] max-w-sm leading-relaxed mb-1">
-                      <span className="text-accent font-medium">
-                        {filename}
-                      </span>{" "}
-                      선택됨
+                    <p className="text-text-tertiary text-[13px] mb-1">
+                      <span className="text-text-secondary">{filename}</span> 선택됨
                     </p>
-                    <p className="text-text-tertiary text-[13px] mb-6">
+                    <p className="text-text-tertiary text-[13px] mb-4">
                       한글에서 문서를 열어 연결하세요.
                     </p>
                     <button
                       onClick={handleConnect}
                       disabled={isConnecting}
-                      className="flex items-center gap-2 px-6 py-3 rounded-xl text-[14px] font-medium bg-gradient-to-r from-accent to-blue-600 text-white hover:scale-[1.03] active:scale-[0.98] transition-all duration-200 shadow-glow disabled:opacity-50 disabled:hover:scale-100"
+                      className="flex items-center gap-2 px-4 py-2 rounded-lg text-[13px] text-text-secondary bg-white/[0.05] border border-white/[0.08] hover:bg-white/[0.08] transition-colors duration-150 disabled:opacity-40"
                     >
                       {isConnecting ? (
-                        <Loader2 size={15} className="animate-spin" />
+                        <Loader2 size={13} className="animate-spin" />
                       ) : (
-                        <Plug size={15} />
+                        <Plug size={13} />
                       )}
                       {isConnecting ? "연결 중..." : "한글에서 열기"}
                     </button>
                   </>
                 ) : (
-                  <>
-                    <p className="text-text-secondary text-[14px] max-w-sm leading-relaxed mb-6">
-                      문서가 연결되었습니다. 아래에 편집 요청을 입력하세요.
-                    </p>
-                    <div className="flex flex-wrap gap-2.5 justify-center max-w-md">
-                      {[
-                        "표 구조 분석해줘",
-                        "첫 번째 표 헤더 확인",
-                        "모든 필드 목록 보여줘",
-                      ].map((hint) => (
-                        <button
-                          key={hint}
-                          onClick={() => setQuery(hint)}
-                          className="px-4 py-2 rounded-xl text-[13px] text-text-secondary bg-white/[0.04] border border-white/[0.07] hover:bg-white/[0.08] hover:border-white/[0.12] hover:-translate-y-0.5 transition-all duration-200"
-                        >
-                          {hint}
-                        </button>
-                      ))}
-                    </div>
-                  </>
+                  <div className="flex flex-wrap gap-2 justify-center max-w-md">
+                    {[
+                      "표 구조 분석해줘",
+                      "첫 번째 표 헤더 확인",
+                      "모든 필드 목록 보여줘",
+                    ].map((hint) => (
+                      <button
+                        key={hint}
+                        onClick={() => setQuery(hint)}
+                        className="px-3 py-1.5 rounded-lg text-[13px] text-text-tertiary bg-white/[0.04] border border-white/[0.06] hover:bg-white/[0.07] hover:text-text-secondary transition-colors duration-150"
+                      >
+                        {hint}
+                      </button>
+                    ))}
+                  </div>
                 )}
-              </motion.div>
+              </div>
             ) : (
               <div className="space-y-5">
                 {messages.map((msg) => (
                   <MessageBubble key={msg.id} message={msg} />
                 ))}
 
-                {/* Processing status - in chat area */}
+                {/* Processing status */}
                 {isAgentRunning && (
                   <motion.div
                     initial={{ opacity: 0, y: 4 }}
                     animate={{ opacity: 1, y: 0 }}
                     className="flex items-center gap-3 px-4 py-2.5 rounded-xl bg-accent/[0.06] border border-accent/10 max-w-fit"
                   >
-                    <Loader2
-                      size={14}
-                      className="text-accent animate-spin"
-                    />
-                    <span className="text-[13px] text-accent/80">
-                      처리 중...
-                    </span>
+                    <Loader2 size={14} className="text-accent animate-spin" />
+                    <span className="text-[13px] text-accent/80">처리 중...</span>
                     <button
                       onClick={handleCancel}
                       className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium text-error/70 hover:text-error bg-error/[0.06] hover:bg-error/[0.12] transition-all duration-150"
@@ -458,12 +425,9 @@ export default function ChatInterface() {
       {/* Input area */}
       <div className="shrink-0 px-4 pb-4 pt-2">
         <div className="max-w-3xl mx-auto">
-          {/* File badge */}
           {selectedFile && !isConnected && messages.length > 0 && (
             <div className="flex items-center gap-2 mb-2 px-1">
-              <span className="text-[12px] text-warning">
-                문서 연결이 필요합니다
-              </span>
+              <span className="text-[12px] text-warning">문서 연결이 필요합니다</span>
               <button
                 onClick={handleConnect}
                 disabled={isConnecting}
@@ -474,7 +438,7 @@ export default function ChatInterface() {
             </div>
           )}
 
-          <div className="bg-white/[0.05] border border-white/[0.08] rounded-2xl focus-within:border-accent/40 focus-within:shadow-glow transition-all duration-200 backdrop-blur-sm">
+          <div className="bg-white/[0.05] border border-white/[0.08] rounded-2xl focus-within:border-accent/40 transition-all duration-200 backdrop-blur-sm">
             <textarea
               ref={textareaRef}
               value={query}
@@ -488,15 +452,6 @@ export default function ChatInterface() {
             />
             <div className="flex items-center justify-between px-3 pb-3">
               <div className="flex items-center gap-2">
-                <button
-                  onClick={handleFileOpen}
-                  disabled={isAgentRunning}
-                  className="w-8 h-8 flex items-center justify-center rounded-lg text-text-tertiary hover:text-text-secondary hover:bg-white/[0.06] transition-all duration-150 disabled:opacity-30"
-                  title="파일 열기"
-                >
-                  <Paperclip size={15} />
-                </button>
-
                 {tokenUsage && !isAgentRunning && (
                   <span className="text-[11px] text-text-tertiary/50 font-mono">
                     {formatTokens(tokenUsage.total)} tokens
@@ -526,7 +481,7 @@ export default function ChatInterface() {
                 <button
                   onClick={handleSubmit}
                   disabled={!isReady}
-                  className="w-9 h-9 flex items-center justify-center rounded-xl bg-gradient-to-r from-accent to-blue-600 text-white hover:scale-[1.05] active:scale-[0.95] transition-all duration-150 disabled:opacity-20 disabled:hover:scale-100 disabled:cursor-default shadow-glow"
+                  className="w-9 h-9 flex items-center justify-center rounded-xl bg-accent text-white hover:bg-accent-hover active:scale-[0.97] transition-all duration-150 disabled:opacity-20 disabled:cursor-default"
                 >
                   <ArrowUp size={17} strokeWidth={2.5} />
                 </button>

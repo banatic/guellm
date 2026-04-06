@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Minus, Square, X, MessageSquare, FlaskConical } from "lucide-react";
 import ChatSidebar from "./components/ChatSidebar";
 import ChatInterface from "./components/ChatInterface";
@@ -13,7 +14,9 @@ type Tab = "chat" | "tools";
 
 export default function App() {
   const loadConfig = useAppStore((s) => s.loadConfig);
+  const zoom = useAppStore((s) => s.zoom);
   const appWindow = useRef(getCurrentWindow());
+  const webviewWindow = useRef(getCurrentWebviewWindow());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeTab, setActiveTab] = useState<Tab>("chat");
 
@@ -22,6 +25,10 @@ export default function App() {
       .then((cfg) => loadConfig(cfg))
       .catch(console.error);
   }, []);
+
+  useEffect(() => {
+    webviewWindow.current.setZoom(zoom).catch(console.error);
+  }, [zoom]);
 
   const minimize = () => appWindow.current.minimize();
   const toggleMax = () => appWindow.current.toggleMaximize();

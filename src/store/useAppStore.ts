@@ -52,6 +52,10 @@ interface AppStore {
   settingsOpen: boolean;
   setSettingsOpen: (v: boolean) => void;
 
+  // 화면 배율
+  zoom: number;
+  setZoom: (v: number) => void;
+
   // 채팅
   messages: Message[];
   isAgentRunning: boolean;
@@ -237,6 +241,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
   settingsOpen: false,
   setSettingsOpen: (v) => set({ settingsOpen: v }),
 
+  zoom: parseFloat(localStorage.getItem("guellm_zoom") ?? "1"),
+  setZoom: (v) => {
+    localStorage.setItem("guellm_zoom", String(v));
+    set({ zoom: v });
+  },
+
   messages: [],
   isAgentRunning: false,
 
@@ -389,11 +399,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   loadConfig: (cfg) => {
     const provider = (cfg.last_provider as Provider) || "anthropic";
+    const zoom = cfg.zoom ?? parseFloat(localStorage.getItem("guellm_zoom") ?? "1");
+    localStorage.setItem("guellm_zoom", String(zoom));
     set({
       provider,
       model: cfg.last_model || DEFAULT_MODELS[provider],
       apiKeys: cfg.api_keys || {},
       selectedFile: cfg.last_file || null,
+      zoom,
     });
   },
 
@@ -404,6 +417,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       last_provider: s.provider,
       last_model: s.model,
       last_file: s.selectedFile,
+      zoom: s.zoom,
     };
   },
 }));
