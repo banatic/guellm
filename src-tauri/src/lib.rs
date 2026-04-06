@@ -49,6 +49,7 @@ pub fn run() {
             commands::get_config,
             commands::update_config,
             commands::open_file_dialog,
+            commands::call_tool,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 앱 실행 오류");

@@ -275,6 +275,53 @@ mod platform {
     }
 
     impl ComObject {
+        /// hwp.SetPos(list, para, pos) — 커서를 특정 좌표로 직접 이동
+        pub fn set_pos(&self, list: i32, para: i32, pos: i32) -> anyhow::Result<bool> {
+            let result = self.call(
+                "SetPos",
+                vec![Variant::I32(list), Variant::I32(para), Variant::I32(pos)],
+            )?;
+            Ok(result.as_bool().unwrap_or(false))
+        }
+
+        /// hwp.GetText(textState, text) — InitScan 루프에서 셀 단위 텍스트 순회
+        /// textState: 단락 유형 코드 (0=문서 끝, 1~=각종 단락/필드 유형)
+        /// Returns: (textState, text, ret_code)
+        pub fn get_text_scan(&self) -> anyhow::Result<(i32, String, i32)> {
+            unsafe {
+                let dispid = self.get_dispid("GetText")?;
+
+                let mut text_state: i32 = 0;
+                let mut text_bstr = BSTR::default();
+
+                // COM 역순: text(BSTR), textState(I4)
+                let mut raws = [
+                    make_byref_bstr(&mut text_bstr),
+                    make_byref_i4(&mut text_state),
+                ];
+
+                let dp = DISPPARAMS {
+                    rgvarg: raws.as_mut_ptr(),
+                    rgdispidNamedArgs: std::ptr::null_mut(),
+                    cArgs: 2,
+                    cNamedArgs: 0,
+                };
+                let mut result = VARIANT::default();
+                let mut ei = EXCEPINFO::default();
+                let mut ae = 0u32;
+
+                self.0.Invoke(
+                    dispid, &GUID::zeroed(), 0,
+                    DISPATCH_METHOD,
+                    &dp, Some(&mut result), Some(&mut ei), Some(&mut ae),
+                ).map_err(|e| anyhow::anyhow!("GetText 실패: {e}"))?;
+
+                let ret_code = raw_to_variant(result)?.as_i32().unwrap_or(-1);
+                let text = text_bstr.to_string();
+                Ok((text_state, text, ret_code))
+            }
+        }
+
         /// hwp.GetPos() — output 파라미터로 (list, para, pos) 반환
         pub fn get_pos(&self) -> anyhow::Result<(i32, i32, i32)> {
             unsafe {
@@ -465,6 +512,12 @@ mod platform {
             anyhow::bail!("COM automation은 Windows 전용입니다.")
         }
         pub fn key_indicator(&self) -> anyhow::Result<String> {
+            anyhow::bail!("COM automation은 Windows 전용입니다.")
+        }
+        pub fn set_pos(&self, _list: i32, _para: i32, _pos: i32) -> anyhow::Result<bool> {
+            anyhow::bail!("COM automation은 Windows 전용입니다.")
+        }
+        pub fn get_text_scan(&self) -> anyhow::Result<(i32, String, i32)> {
             anyhow::bail!("COM automation은 Windows 전용입니다.")
         }
     }

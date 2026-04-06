@@ -68,6 +68,7 @@ fn context_limit(model: &str) -> u64 {
 
 /// Truncate old tool-result messages when approaching context limit.
 /// Keeps the most recent `keep_recent` tool-result entries intact.
+/// 오래된 tool result를 항상 80자로 잘라 TPM 절감 (keep_recent개만 원본 보존)
 fn prune_openai_messages(messages: &mut [Value], keep_recent: usize) {
     let tool_indices: Vec<usize> = messages
         .iter()
@@ -81,16 +82,16 @@ fn prune_openai_messages(messages: &mut [Value], keep_recent: usize) {
     let cutoff = tool_indices.len() - keep_recent;
     for &idx in &tool_indices[..cutoff] {
         if let Some(content) = messages[idx]["content"].as_str() {
-            if content.len() > 200 {
-                messages[idx]["content"] = json!(format!("{}...[truncated]", &content[..200]));
+            if content.len() > 80 {
+                let safe = content.char_indices().nth(80).map(|(i, _)| i).unwrap_or(content.len());
+                messages[idx]["content"] = json!(format!("{}…[생략]", &content[..safe]));
             }
         }
     }
 }
 
 fn prune_anthropic_messages(messages: &mut [Value], keep_recent: usize) {
-    // Tool results live in user messages as arrays of {type: "tool_result", content: ...}
-    let mut tool_result_locs: Vec<(usize, usize)> = vec![]; // (msg_idx, block_idx)
+    let mut tool_result_locs: Vec<(usize, usize)> = vec![];
     for (mi, msg) in messages.iter().enumerate() {
         if let Some(arr) = msg["content"].as_array() {
             for (bi, block) in arr.iter().enumerate() {
@@ -106,9 +107,10 @@ fn prune_anthropic_messages(messages: &mut [Value], keep_recent: usize) {
     let cutoff = tool_result_locs.len() - keep_recent;
     for &(mi, bi) in &tool_result_locs[..cutoff] {
         if let Some(content) = messages[mi]["content"][bi]["content"].as_str() {
-            if content.len() > 200 {
+            if content.len() > 80 {
+                let safe = content.char_indices().nth(80).map(|(i, _)| i).unwrap_or(content.len());
                 messages[mi]["content"][bi]["content"] =
-                    json!(format!("{}...[truncated]", &content[..200]));
+                    json!(format!("{}…[생략]", &content[..safe]));
             }
         }
     }
@@ -133,9 +135,10 @@ fn prune_gemini_contents(contents: &mut [Value], keep_recent: usize) {
         if let Some(result) = contents[ci]["parts"][pi]["functionResponse"]["response"]["result"]
             .as_str()
         {
-            if result.len() > 200 {
+            if result.len() > 80 {
+                let safe = result.char_indices().nth(80).map(|(i, _)| i).unwrap_or(result.len());
                 contents[ci]["parts"][pi]["functionResponse"]["response"]["result"] =
-                    json!(format!("{}...[truncated]", &result[..200]));
+                    json!(format!("{}…[생략]", &result[..safe]));
             }
         }
     }
@@ -258,9 +261,11 @@ impl LlmClient {
                 anyhow::bail!("에이전트가 취소되었습니다.");
             }
 
-            // Prune if approaching limit
+            // 매 턴마다 오래된 tool result 축약 (TPM 절감); 최근 3개만 원본 유지
+            prune_openai_messages(&mut messages, 3);
+            // 컨텍스트 한계 근접 시 더 공격적으로 정리
             if cumulative_tokens > limit * 80 / 100 {
-                prune_openai_messages(&mut messages, 4);
+                prune_openai_messages(&mut messages, 1);
             }
 
             let body = json!({
@@ -412,10 +417,7 @@ impl LlmClient {
                     let args: Value =
                         serde_json::from_str(args_str).unwrap_or(json!({}));
 
-                    event_cb(AgentEvent::ToolCall {
-                        name: name.clone(),
-                        args: args.clone(),
-                    });
+                    // ToolCall 이벤트는 tool_executor 안에서 확인 후 발생 (write tool 타이밍 정합성)
                     let result = tool_executor(name.clone(), args).await;
                     event_cb(AgentEvent::ToolResult {
                         name: name.clone(),
@@ -466,8 +468,9 @@ impl LlmClient {
                 anyhow::bail!("에이전트가 취소되었습니다.");
             }
 
+            prune_anthropic_messages(&mut messages, 3);
             if cumulative_tokens > limit * 80 / 100 {
-                prune_anthropic_messages(&mut messages, 4);
+                prune_anthropic_messages(&mut messages, 1);
             }
 
             let body = json!({
@@ -645,10 +648,7 @@ impl LlmClient {
                     let args: Value =
                         serde_json::from_str(json_str).unwrap_or(json!({}));
 
-                    event_cb(AgentEvent::ToolCall {
-                        name: name.clone(),
-                        args: args.clone(),
-                    });
+                    // ToolCall 이벤트는 tool_executor 안에서 확인 후 발생
                     let result = tool_executor(name.clone(), args).await;
                     event_cb(AgentEvent::ToolResult {
                         name: name.clone(),
@@ -710,8 +710,9 @@ impl LlmClient {
                 anyhow::bail!("에이전트가 취소되었습니다.");
             }
 
+            prune_gemini_contents(&mut contents, 3);
             if cumulative_tokens > limit * 80 / 100 {
-                prune_gemini_contents(&mut contents, 4);
+                prune_gemini_contents(&mut contents, 1);
             }
 
             let body = json!({
@@ -793,10 +794,7 @@ impl LlmClient {
                 let name = fc["name"].as_str().unwrap_or("").to_string();
                 let args = fc["args"].clone();
 
-                event_cb(AgentEvent::ToolCall {
-                    name: name.clone(),
-                    args: args.clone(),
-                });
+                // ToolCall 이벤트는 tool_executor 안에서 확인 후 발생
                 let result = tool_executor(name.clone(), args).await;
                 event_cb(AgentEvent::ToolResult {
                     name: name.clone(),

@@ -163,30 +163,7 @@ pub async fn run_agent(
     .await
     .map_err(|e| e.to_string())?;
 
-    // ── 2) 문서 스냅샷 (Undo/Rollback 용) ──
-    let backup_path = format!(
-        "{}\\hwp_agent_backup_{}.hwp",
-        std::env::temp_dir().display(),
-        chrono_timestamp()
-    );
-    match send_hwp(
-        &state,
-        HwpCommand::Snapshot {
-            backup_path: backup_path.clone(),
-        },
-    )
-    .await
-    {
-        Ok(_) => {
-            *state.last_backup_path.lock().unwrap() = Some(backup_path);
-        }
-        Err(e) => {
-            // Snapshot failure is non-fatal — warn but continue
-            eprintln!("스냅샷 저장 실패 (계속 진행): {e}");
-        }
-    }
-
-    // ── 3) CancellationToken 생성 ──
+    // ── 2) CancellationToken 생성 ──
     let cancel_token = tokio_util::sync::CancellationToken::new();
     *state.cancel_token.lock().unwrap() = Some(cancel_token.clone());
 
@@ -195,7 +172,7 @@ pub async fn run_agent(
     let pending_confirm = state.pending_confirm.clone();
     let cancel_for_cleanup = cancel_token.clone();
 
-    // ── 4) 에이전틱 루프를 별도 tokio 태스크로 실행 ──
+    // ── 3) 에이전틱 루프를 별도 tokio 태스크로 실행 ──
     tokio::spawn(async move {
         let client = match LlmClient::new(&params.provider, &params.api_key, Some(&params.model)) {
             Ok(c) => c,
@@ -235,7 +212,7 @@ pub async fn run_agent(
                         {
                             *pc.lock().unwrap() = Some(confirm_tx);
                         }
-                        // 프론트엔드에 확인 요청 이벤트 전송
+                        // 프론트엔드에 확인 요청 이벤트 전송 (ToolCall 전에 먼저)
                         let _ = app_h.emit(
                             "agent-event",
                             AgentEvent::ToolConfirmRequest {
@@ -244,19 +221,38 @@ pub async fn run_agent(
                             },
                         );
 
-                        // 사용자 응답 또는 취소 대기
+                        // 사용자 응답 또는 취소 대기 (biased: 취소 우선)
                         let approved = tokio::select! {
-                            result = confirm_rx => {
-                                result.unwrap_or(false)
-                            }
+                            biased;
                             _ = ct.cancelled() => {
                                 return format!("⛔ 에이전트가 취소되었습니다.");
+                            }
+                            result = confirm_rx => {
+                                result.unwrap_or(false)
                             }
                         };
 
                         if !approved {
                             return format!("⛔ 사용자가 도구 실행을 거부했습니다: {name}");
                         }
+
+                        // 승인 후 ToolCall 이벤트 발생 (pending → running 전환)
+                        let _ = app_h.emit(
+                            "agent-event",
+                            AgentEvent::ToolCall {
+                                name: name.clone(),
+                                args: args.clone(),
+                            },
+                        );
+                    } else {
+                        // read tool: 즉시 ToolCall 이벤트 발생
+                        let _ = app_h.emit(
+                            "agent-event",
+                            AgentEvent::ToolCall {
+                                name: name.clone(),
+                                args: args.clone(),
+                            },
+                        );
                     }
 
                     // ── 실제 HWP 도구 실행 ──
@@ -313,15 +309,6 @@ pub async fn run_agent(
     Ok(())
 }
 
-/// Simple timestamp for backup filenames
-fn chrono_timestamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let d = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{}", d.as_secs())
-}
-
 // ── 설정 관리 ─────────────────────────────────────────────
 
 #[tauri::command]
@@ -340,6 +327,19 @@ pub async fn update_config(
         *cfg = new_config.clone();
     }
     save_config(&new_config).map_err(|e| e.to_string())
+}
+
+// ── 도구 직접 테스트 ──────────────────────────────────────
+
+#[tauri::command]
+pub async fn call_tool(
+    state: tauri::State<'_, AppState>,
+    name: String,
+    args: serde_json::Value,
+) -> Result<String, String> {
+    send_hwp(&state, HwpCommand::DispatchTool { name, args })
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ── 파일 다이얼로그 ───────────────────────────────────────

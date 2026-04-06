@@ -149,12 +149,15 @@ export default function ChatSidebar({ collapsed, onToggle }: Props) {
                     )}
                   </div>
                   {(isActive || isHovered) && !isAgentRunning && (
-                    <button
+                    <div
+                      role="button"
+                      tabIndex={0}
                       onClick={(e) => handleDelete(e, conv.id)}
-                      className="shrink-0 mt-0.5 w-6 h-6 flex items-center justify-center rounded-md text-text-tertiary hover:text-error hover:bg-error/[0.1] transition-all duration-150"
+                      onKeyDown={(e) => e.key === "Enter" && handleDelete(e as unknown as React.MouseEvent, conv.id)}
+                      className="shrink-0 mt-0.5 w-6 h-6 flex items-center justify-center rounded-md text-text-tertiary hover:text-error hover:bg-error/[0.1] transition-all duration-150 cursor-pointer"
                     >
                       <Trash2 size={12} />
-                    </button>
+                    </div>
                   )}
                 </motion.button>
               );

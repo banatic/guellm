@@ -3,24 +3,33 @@
 
 use serde_json::{json, Value};
 
-pub const SYSTEM_PROMPT: &str = r#"당신은 한글(HWP) 문서 편집 에이전트입니다.
-사용자의 요청을 반드시 도구(tool)를 호출하여 실행하세요.
+pub const SYSTEM_PROMPT: &str = r#"당신은 한글(HWP) 문서 편집 에이전트입니다. 반드시 도구를 호출해서 실행하세요.
 
-## 절대 규칙
-- 문서를 수정하라는 요청에는 반드시 도구를 호출하여 실제로 수정하세요. 텍스트로 "수정했습니다"라고만 답하면 안 됩니다.
-- 어떤 내용을 쓸지 설명만 하지 말고, 반드시 fill_table_data_matrix / fill_field_data / replace_text_patterns 등의 도구를 호출해서 실제 데이터를 문서에 기록하세요.
-- 도구 호출 없이 작업 완료를 선언하는 것은 금지입니다.
+## 도구 사용 순서
+1. 텍스트 읽기: get_document_text() — 문서 전체 텍스트(표 포함). 특정 표 셀만 읽으려면 get_table_schema() 사용
+2. 표 작업: get_all_tables_overview() → get_table_schema(index) → fill_table_data_matrix()
+3. 수정: 누름틀=fill_field_data, 표 밖 텍스트=replace_text_patterns, 표 안=fill_table_data_matrix
 
-## 효율적 탐색 원칙
-1. 작업 시작: get_all_tables_overview() → 전체 표 목록 파악 (analyze_document_structure 대신 이것을 우선 사용)
-2. 대상 표 확정 후에만 get_table_schema(table_index)로 세부 구조 확인
-3. 수정: 누름틀은 fill_field_data(), 일반 텍스트는 replace_text_patterns(), 표 데이터는 fill_table_data_matrix() 사용
-4. 모든 도구 호출이 완료된 후, 마지막에 간단히 결과를 요약
+## 특정 셀 내용 읽기/요약
+- "탐구방법 및 실행계획 요약해줘" 같이 특정 셀 내용이 필요한 경우:
+  1. get_all_tables_overview() → 표 인덱스 확인
+  2. get_table_schema(index) → 해당 셀의 row/col 번호 확인
+  3. get_cell_text(table_index, row, col) → 전체 내용 읽기(truncate 없음) → 요약/분석
 
-## 핵심 규칙
-- get_all_tables_overview() 한 번으로 표 목록 파악 → 필요한 표만 get_table_schema() 호출
-- 문서에서 실제 확인한 텍스트만 사용하세요. 추측 금지
-- 대화 히스토리가 제공되면, 이전 대화 맥락("다음 표", "같은 방식으로" 등)을 반드시 참고하세요"#;
+## replace_text_patterns 사용 금지 조건 (위반 시 자동 거부)
+- 표 셀 내용 수정 → fill_table_data_matrix 사용
+- 80자 초과 검색어
+- \n 포함 검색어 (HWP 단락 경계 검색 불가)
+
+## 표 셀 수정 절차
+1. get_all_tables_overview() → 표 인덱스·역할(role) 확인
+2. get_table_schema(index) → 행 번호(row) 확인
+3. fill_table_data_matrix(index, start_row, [["값"]], start_col=0 또는 1)
+   - start_col=1: 라벨 열 건너뜀 (내용 열만 수정)
+
+## 주의
+- 이전 대화 맥락("다음 표", "같은 방식으로")을 반드시 참고
+- 도구 호출 없이 "완료" 선언 금지"#;
 
 /// 사용자 확인이 필요한 write(파괴적) 도구 목록
 pub const WRITE_TOOLS: &[&str] = &[
@@ -43,6 +52,11 @@ pub fn hwp_tools() -> Vec<Value> {
         json!({
             "name": "analyze_document_structure",
             "description": "문서 전체 구조(페이지 수, 표 개수, 필드 목록)를 분석합니다. 모든 작업 시작 시 먼저 호출하세요.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }),
+        json!({
+            "name": "get_document_text",
+            "description": "문서의 전체 텍스트 내용을 반환합니다. 표 내부 텍스트도 포함됩니다. 내용 요약, 번역, 분석 등 텍스트를 읽어야 할 때 사용하세요.",
             "parameters": {"type": "object", "properties": {}, "required": []}
         }),
         json!({
@@ -75,6 +89,19 @@ pub fn hwp_tools() -> Vec<Value> {
                     "keyword": {"type": "string", "description": "찾을 텍스트"}
                 },
                 "required": ["keyword"]
+            }
+        }),
+        json!({
+            "name": "get_cell_text",
+            "description": "특정 셀의 전체 텍스트를 반환합니다 (truncate 없음). get_table_schema는 60자로 잘리므로, 셀 내용을 읽거나 요약/번역할 때는 이 도구를 사용하세요. row/col 번호는 get_table_schema로 먼저 확인하세요.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_index": {"type": "integer"},
+                    "row": {"type": "integer", "description": "0부터 시작하는 행 인덱스"},
+                    "col": {"type": "integer", "description": "0부터 시작하는 열 인덱스"}
+                },
+                "required": ["table_index", "row", "col"]
             }
         }),
         json!({
@@ -139,15 +166,17 @@ pub fn hwp_tools() -> Vec<Value> {
         }),
         json!({
             "name": "fill_table_data_matrix",
-            "description": "2차원 배열 데이터를 표의 특정 행부터 채웁니다.",
+            "description": "2차원 배열 데이터를 표의 특정 행/열부터 채웁니다. ⚠️ matrix 내부 배열의 각 원소 = 셀 1개. 한 셀에 여러 줄 입력 시 \\n 사용 (예: [[\"1줄\\n2줄\"]] = 셀 1개에 2단락). start_col로 라벨 열을 건너뛸 수 있습니다.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "table_index": {"type": "integer"},
-                    "start_row": {"type": "integer"},
+                    "start_row": {"type": "integer", "description": "0부터 시작하는 행 인덱스"},
+                    "start_col": {"type": "integer", "description": "0부터 시작하는 열 인덱스 (기본 0). 라벨 열을 건너뛰려면 1 이상"},
                     "matrix": {
                         "type": "array",
-                        "items": {"type": "array", "items": {"type": "string"}}
+                        "items": {"type": "array", "items": {"type": "string"}},
+                        "description": "행 배열. 각 내부 배열 = 1행의 셀들. 내부 원소 하나 = 셀 하나. 셀 내 줄바꿈은 \\n."
                     },
                     "cell_delay": {"type": "number", "default": 0.3}
                 },

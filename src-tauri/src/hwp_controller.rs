@@ -205,27 +205,12 @@ impl HwpController {
     fn save(&self, save_path: Option<&str>) -> anyhow::Result<String> {
         let hwp = self.hwp()?;
         if let Some(path) = save_path {
-            let act = hwp
-                .call("CreateAction", vec![Variant::String("FileSaveAs_S".to_string())])?
-                .as_object()
-                .ok_or_else(|| anyhow::anyhow!("CreateAction 실패"))?;
-            let ps = act
-                .call("CreateSet", vec![])?
-                .as_object()
-                .ok_or_else(|| anyhow::anyhow!("CreateSet 실패"))?;
-            ps.call("SetItem", vec![
-                Variant::String("filename".to_string()),
+            // SaveAs COM 직접 호출 — FileSaveAs_S Action과 달리 UI 다이얼로그가 절대 뜨지 않음
+            hwp.call("SaveAs", vec![
                 Variant::String(path.to_string()),
-            ])?;
-            ps.call("SetItem", vec![
-                Variant::String("Format".to_string()),
                 Variant::String("HWP".to_string()),
+                Variant::String(String::new()),
             ])?;
-            ps.call("SetItem", vec![
-                Variant::String("Attributes".to_string()),
-                Variant::I32(0),
-            ])?;
-            act.call("Execute", vec![Variant::Object(ps)])?;
             Ok(path.to_string())
         } else {
             let act = hwp
@@ -248,90 +233,39 @@ impl HwpController {
         Ok(())
     }
 
-    // ─────────────── 텍스트 스캔 (InitScan/GetText) ─────────
+    // ─────────────── HTML 기반 문서 읽기 ────────────────────
+    // Python PoC와 동일하게 GetTextFile("HTML") → HTML 파싱 방식을 사용합니다.
+    // GetPos/GetText/KeyIndicator의 VT_BYREF output 파라미터는 신뢰할 수 없어서
+    // 모든 READ 경로는 이 HTML 기반 방식으로 대체합니다.
 
-    /// InitScan(0x07) + GetText()로 문서 전체 텍스트를 단락 단위로 추출.
-    /// 표 내부 텍스트도 포함됩니다.
-    fn scan_all_text(&self) -> anyhow::Result<Vec<String>> {
+    fn get_html(&self) -> anyhow::Result<String> {
         let hwp = self.hwp()?;
-        // option 0x07 = 본문(0x01) + 각주(0x02) + 표(0x04)
-        hwp.call("InitScan", vec![Variant::I32(0x07)])?;
-
-        let mut paragraphs = Vec::new();
-        let mut buf = Vec::new();
-
-        for _ in 0..20_000 {
-            let result = hwp.call("GetText", vec![])?;
-            // GetText returns a tuple-like: (state, text)
-            // In COM it may come as a string "state\x00text" or we get it from the return
-            let repr = result.to_string_repr();
-            // HWP GetText returns (state_code, text_string)
-            // state: 0=끝, 1=일반텍스트, 2=단락끝, 3=섹션끝
-            let (state, text) = parse_gettext_result(&result, &repr);
-
-            if state == 0 {
-                if !buf.is_empty() {
-                    paragraphs.push(buf.join(""));
-                }
-                break;
-            }
-            if state == 1 || state == 2 || state == 3 {
-                let tok = text.trim().to_string();
-                if !tok.is_empty() {
-                    buf.push(tok);
-                }
-            }
-            if state == 2 || state == 3 {
-                let para = buf.join(" ").trim().to_string();
-                if !para.is_empty() {
-                    paragraphs.push(para);
-                }
-                buf.clear();
-            }
-        }
-
-        let _ = hwp.call("ReleaseScan", vec![]);
-        Ok(paragraphs)
+        let result = hwp.call(
+            "GetTextFile",
+            vec![
+                Variant::String("HTML".to_string()),
+                Variant::String(String::new()),
+            ],
+        )?;
+        Ok(result.to_string_repr())
     }
 
-    /// 문서에서 텍스트가 존재하는지 ForwardFind로 확인
+    /// 문서에서 텍스트가 존재하는지 HTML 문자열에서 확인합니다.
+    /// Python PoC의 _text_exists()와 동일 — ForwardFind 호출 전 사전 검증용.
+    /// ForwardFind는 텍스트가 없으면 HWP 다이얼로그를 블로킹하므로 이 검사가 필수입니다.
     fn text_exists(&self, text: &str) -> bool {
-        let hwp = match self.hwp() {
+        let html = match self.get_html() {
             Ok(h) => h,
             Err(_) => return false,
         };
-        // 문서 처음으로 이동
-        let _ = hwp.call("Run", vec![Variant::String("MoveDocBegin".to_string())]);
-        let act = match hwp.call("CreateAction", vec![Variant::String("ForwardFind".to_string())]) {
-            Ok(v) => match v.as_object() {
-                Some(o) => o,
-                None => return false,
-            },
-            Err(_) => return false,
-        };
-        let ps = match act.call("CreateSet", vec![]) {
-            Ok(v) => match v.as_object() {
-                Some(o) => o,
-                None => return false,
-            },
-            Err(_) => return false,
-        };
-        let _ = ps.call("SetItem", vec![
-            Variant::String("FindString".to_string()),
-            Variant::String(text.to_string()),
-        ]);
-        let _ = ps.call("SetItem", vec![
-            Variant::String("IgnoreCase".to_string()),
-            Variant::Bool(true),
-        ]);
-        let _ = ps.call("SetItem", vec![
-            Variant::String("Direction".to_string()),
-            Variant::I32(3), // 전체 문서
-        ]);
-        act.call("Execute", vec![Variant::Object(ps)])
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+        html_contains_text(&html, text, false)
+    }
+
+    /// 단락 수를 HTML에서 카운트합니다 (InitScan/GetText VT_BYREF 대체)
+    fn count_paragraphs_from_html(&self) -> usize {
+        let html = self.get_html().unwrap_or_default();
+        let lower = html.to_lowercase();
+        lower.matches("<p").count()
     }
 
     fn get_field_names(&self) -> Vec<String> {
@@ -356,9 +290,17 @@ impl HwpController {
 
     fn find_replace(&self, find: &str, replace: &str, case_sensitive: bool) -> anyhow::Result<()> {
         let hwp = self.hwp()?;
+        // \n 포함 패턴은 공백으로 정규화 (HWP FindReplace는 개행 리터럴 미지원)
+        let find_norm: String = find.split_whitespace().collect::<Vec<_>>().join(" ");
+        let find = find_norm.as_str();
         if !self.text_exists(find) {
             return Ok(());
         }
+
+        // 커서를 문서 처음으로 이동 — AllReplace가 문서 끝에서 시작할 경우
+        // "문서 끝까지 찾을까요?" 다이얼로그가 떠서 COM이 블로킹되는 것을 방지
+        hwp.call("Run", vec![Variant::String("MoveDocBegin".to_string())])?;
+
         let act = hwp
             .call("CreateAction", vec![Variant::String("AllReplace".to_string())])?
             .as_object()
@@ -379,8 +321,24 @@ impl HwpController {
             Variant::String("IgnoreCase".to_string()),
             Variant::Bool(!case_sensitive),
         ])?;
+        // AllWordReplace=false: 부분 문자열도 치환
         ps.call("SetItem", vec![
             Variant::String("AllWordReplace".to_string()),
+            Variant::Bool(false),
+        ])?;
+        // Direction=0: 커서(문서 처음) 기준 앞방향 전체 검색 — wrap 없으므로 다이얼로그 없음
+        ps.call("SetItem", vec![
+            Variant::String("Direction".to_string()),
+            Variant::I32(0),
+        ])?;
+        // FindRegExp=false: 정규식 아닌 리터럴 문자열 매칭
+        ps.call("SetItem", vec![
+            Variant::String("FindRegExp".to_string()),
+            Variant::Bool(false),
+        ])?;
+        // SearchTbl=true: 표 안 셀에서도 검색
+        ps.call("SetItem", vec![
+            Variant::String("SearchTbl".to_string()),
             Variant::Bool(true),
         ])?;
         act.call("Execute", vec![Variant::Object(ps)])?;
@@ -402,18 +360,44 @@ impl HwpController {
             result["pages"] = json!(pages.as_i32().unwrap_or(0));
         }
 
-        // InitScan으로 단락 수 계산
-        let paragraphs = self.scan_all_text().unwrap_or_default();
-        result["paragraph_count"] = json!(paragraphs.len());
-
-        // 표 수는 네비게이션으로 카운트
-        let tables = self.scan_tables()?;
-        result["table_count"] = json!(tables.len());
+        // HTML 기반으로 표/단락 수 계산 (Python PoC와 동일)
+        let html = self.get_html().unwrap_or_default();
+        let lower = html.to_lowercase();
+        result["table_count"] = json!(lower.matches("<table").count());
+        result["paragraph_count"] = json!(lower.matches("<p").count());
 
         let fields = self.get_field_names();
         result["fields"] = json!(fields);
 
         Ok(result)
+    }
+
+    fn get_document_text(&self) -> anyhow::Result<Value> {
+        // GetTextFile("TEXT") 직접 사용 — HTML 파싱 불필요, 14배 경량
+        let hwp = self.hwp()?;
+        let result = hwp.call(
+            "GetTextFile",
+            vec![
+                Variant::String("TEXT".to_string()),
+                Variant::String(String::new()),
+            ],
+        )?;
+        let raw = result.to_string_repr();
+        // \r\n → \n 정규화, 연속 빈 줄 제거
+        let cleaned: String = raw
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // 토큰 절감: 최대 8000자
+        let truncated = truncate_chars(&cleaned, 8000);
+        let note = if cleaned.chars().count() > 8000 {
+            format!("\n…(이하 {}자 생략. 특정 표 셀 내용은 get_cell_text 사용 권장)", cleaned.chars().count() - 8000)
+        } else {
+            String::new()
+        };
+        Ok(json!({ "text": format!("{truncated}{note}") }))
     }
 
     fn get_field_info(&self) -> anyhow::Result<Value> {
@@ -431,163 +415,15 @@ impl HwpController {
         Ok(json!(fields))
     }
 
-    // ─────────────── 표 스캔 (테이블 네비게이션) ─────────────
+    // ─────────────── 표 스캔 (HTML 기반) ────────────────────
+    // Python PoC의 _parse_all_tables()와 동일한 방식입니다.
+    // GetPos/KeyIndicator VT_BYREF 방식 대신 GetTextFile("HTML") 파싱을 사용합니다.
 
-    /// 문서의 모든 표를 순회하며 구조를 읽어옵니다.
-    /// 전략: 문단 단위 이동 + KeyIndicator(VT_BYREF)로 표 진입 감지 +
-    ///        GetPos(VT_BYREF)로 커서 위치 비교하여 이동/탈출 판단
     fn scan_tables(&self) -> anyhow::Result<Vec<TableData>> {
-        let hwp = self.hwp()?;
-        let mut tables = Vec::new();
-
-        // 문서 처음으로 이동
-        hwp.call("Run", vec![Variant::String("MoveDocBegin".to_string())])?;
-
-        let mut iteration = 0;
-        let max_iterations = 10000; // 안전 제한
-
-        loop {
-            if iteration >= max_iterations {
-                eprintln!("[scan_tables] 최대 반복 횟수 도달, 중단");
-                break;
-            }
-            iteration += 1;
-
-            // 현재 위치가 표 안인지 확인 (KeyIndicator ctrlname 기반)
-            if self.is_cursor_in_table()? {
-                if let Ok(table) = self.read_current_table() {
-                    if table.rows > 0 && table.cols > 0 {
-                        tables.push(table);
-                    }
-                }
-                // 표 밖으로 나가기: 위치 비교 + KeyIndicator로 확인
-                for _ in 0..500 {
-                    let pos_before = self.get_cursor_pos();
-                    let _ = hwp.call("Run", vec![Variant::String("MoveNextParaBegin".to_string())]);
-                    let pos_after = self.get_cursor_pos();
-                    if pos_after == pos_before {
-                        break; // 문서 끝
-                    }
-                    if !self.is_cursor_in_table()? {
-                        break; // 표 탈출 성공
-                    }
-                }
-                continue;
-            }
-
-            // 다음 문단으로 이동 (위치 비교로 이동 감지 — Run 반환값에 의존하지 않음)
-            let pos_before = self.get_cursor_pos();
-            let _ = hwp.call("Run", vec![Variant::String("MoveNextParaBegin".to_string())]);
-            let pos_after = self.get_cursor_pos();
-
-            if pos_after == pos_before {
-                break; // 문서 끝
-            }
-        }
-
-        Ok(tables)
+        let html = self.get_html()?;
+        Ok(parse_tables_from_html(&html))
     }
 
-    /// KeyIndicator의 ctrlname으로 현재 커서가 표 안에 있는지 확인합니다.
-    /// VT_BYREF output 파라미터를 통해 ctrlname을 가져옵니다.
-    fn is_cursor_in_table(&self) -> anyhow::Result<bool> {
-        let hwp = self.hwp()?;
-        match hwp.key_indicator() {
-            Ok(ctrl_name) => {
-                let result = ctrl_name.contains("표")
-                    || ctrl_name.contains("table")
-                    || ctrl_name.contains("Table");
-                Ok(result)
-            }
-            Err(e) => {
-                eprintln!("[is_cursor_in_table] KeyIndicator 실패: {e}");
-                Ok(false)
-            }
-        }
-    }
-
-    /// 현재 커서가 위치한 표의 전체 셀을 읽습니다.
-    /// 전략: 표의 첫 셀로 이동 → 셀 읽기 → TableRightCell로 다음 셀 →
-    ///        위치가 변하지 않으면 행 끝 → 다시 이동하면 다음 행 → 위치가 안 변하면 표 끝
-    fn read_current_table(&self) -> anyhow::Result<TableData> {
-        let hwp = self.hwp()?;
-
-        // 표 첫 셀로 이동 (Ctrl+Home in table)
-        hwp.call("Run", vec![Variant::String("TableColBegin".to_string())])?;
-        hwp.call("Run", vec![Variant::String("TableCellBlock".to_string())])?;
-        hwp.call("Run", vec![Variant::String("TableCellBlock".to_string())])?;
-        hwp.call("Run", vec![Variant::String("MoveTopLevelBegin".to_string())])?;
-
-        let mut rows: Vec<Vec<String>> = Vec::new();
-        let mut current_row: Vec<String> = Vec::new();
-        let mut prev_pos = self.get_cursor_pos();
-        let mut total_cells_read = 0usize;
-        let max_cells = 5000; // 안전 제한
-
-        loop {
-            if total_cells_read >= max_cells {
-                break;
-            }
-
-            // 현재 셀 텍스트 읽기
-            let cell_text = self.read_current_cell_text()?;
-            current_row.push(cell_text);
-            total_cells_read += 1;
-
-            // 다음 셀로 이동
-            hwp.call("Run", vec![Variant::String("TableRightCell".to_string())])?;
-            let new_pos = self.get_cursor_pos();
-
-            // 위치가 안 변했으면 표 끝
-            if new_pos == prev_pos {
-                if !current_row.is_empty() {
-                    rows.push(std::mem::take(&mut current_row));
-                }
-                break;
-            }
-
-            // 행이 바뀌었는지 확인 (row 번호 비교)
-            if new_pos.1 != prev_pos.1 {
-                rows.push(std::mem::take(&mut current_row));
-            }
-
-            prev_pos = new_pos;
-        }
-
-        let row_count = rows.len();
-        let col_count = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-
-        Ok(TableData {
-            rows: row_count,
-            cols: col_count,
-            cells: rows,
-        })
-    }
-
-    /// 현재 셀의 텍스트를 읽습니다.
-    fn read_current_cell_text(&self) -> anyhow::Result<String> {
-        let hwp = self.hwp()?;
-        // 셀 전체 선택 후 선택 텍스트 가져오기
-        hwp.call("Run", vec![Variant::String("SelectAll".to_string())])?;
-        let text = hwp
-            .call("GetSelectedText", vec![])
-            .ok()
-            .map(|v| v.to_string_repr())
-            .unwrap_or_default();
-        // 선택 해제
-        hwp.call("Run", vec![Variant::String("Cancel".to_string())])?;
-        Ok(text.trim().to_string())
-    }
-
-    /// 커서 위치를 (list, para, pos) 튜플로 반환
-    /// VT_BYREF output 파라미터를 통해 정확한 위치를 가져옵니다.
-    fn get_cursor_pos(&self) -> (i32, i32, i32) {
-        let hwp = match self.hwp() {
-            Ok(h) => h,
-            Err(_) => return (-1, -1, -1),
-        };
-        hwp.get_pos().unwrap_or((-1, -1, -1))
-    }
 
     fn get_all_tables_overview(&self) -> anyhow::Result<Value> {
         let tables = self.scan_tables()?;
@@ -605,30 +441,29 @@ impl HwpController {
                     .cloned()
                     .unwrap_or_default()
                     .iter()
-                    .map(|h| {
-                        if h.len() > 30 {
-                            format!("{}...", &h[..30])
-                        } else {
-                            h.clone()
-                        }
-                    })
+                    .map(|h| truncate_chars(h, 30))
                     .collect();
 
+                // 제목표 판별:
+                // (1) 행/열이 작고 (2) 셀 내용이 짧으며 (3) 다음 표가 더 크면 제목표로 간주
+                let next_is_bigger = idx + 1 < tables.len()
+                    && (tables[idx + 1].rows > table.rows || tables[idx + 1].cols > table.cols);
                 let is_title = table.rows <= 2
-                    && table.cols <= 2
-                    && table.cells.iter().all(|r| r.iter().all(|c| c.len() < 80));
+                    && table.cols <= 3
+                    && table.cells.iter().all(|r| r.iter().all(|c| c.len() < 100))
+                    && next_is_bigger;
+
+                let role = if is_title { "title_table" } else { "data_table" };
 
                 let mut entry = json!({
                     "table_index": idx,
+                    "role": role,
                     "rows": table.rows,
                     "cols": table.cols,
                     "headers": headers,
                 });
 
-                if is_title {
-                    entry["role"] = json!("title");
-                }
-                // 인접 표 관계
+                // 제목표인 경우 연결된 데이터표 정보 추가
                 if is_title && idx + 1 < tables.len() {
                     let next = &tables[idx + 1];
                     let next_headers: Vec<String> = next
@@ -638,21 +473,14 @@ impl HwpController {
                         .unwrap_or_default()
                         .iter()
                         .take(4)
-                        .map(|h| {
-                            if h.len() > 20 {
-                                format!("{}...", &h[..20])
-                            } else {
-                                h.clone()
-                            }
-                        })
+                        .map(|h| truncate_chars(h, 20))
                         .collect();
-                    entry["data_table"] = json!(format!(
-                        "→ table_index:{} ({}x{}, {})",
-                        idx + 1,
-                        next.rows,
-                        next.cols,
-                        next_headers.join("/")
-                    ));
+                    entry["linked_data_table"] = json!({
+                        "table_index": idx + 1,
+                        "rows": next.rows,
+                        "cols": next.cols,
+                        "headers": next_headers,
+                    });
                 }
 
                 entry
@@ -676,10 +504,16 @@ impl HwpController {
             .cloned()
             .unwrap_or_default();
 
-        let cells: Vec<Vec<Value>> = table
+        // cells를 [{row: N, cells: [...]}] 형식으로 반환 — LLM이 start_row를 정확히 파악
+        // 셀 내용은 60자로 잘라 토큰 절감
+        let cells: Vec<Value> = table
             .cells
             .iter()
-            .map(|row| row.iter().map(|c| json!(c)).collect())
+            .enumerate()
+            .map(|(i, row)| {
+                let trimmed: Vec<String> = row.iter().map(|c| truncate_chars(c, 60)).collect();
+                json!({"row": i, "cells": trimmed})
+            })
             .collect();
 
         Ok(json!({
@@ -691,39 +525,33 @@ impl HwpController {
         }))
     }
 
-    fn find_text_anchor(&self, keyword: &str) -> anyhow::Result<Value> {
-        if !self.text_exists(keyword) {
-            return Ok(json!({"found": false, "keyword": keyword}));
+    fn get_cell_text(&self, table_index: usize, row: usize, col: usize) -> anyhow::Result<Value> {
+        let tables = self.scan_tables()?;
+        if table_index >= tables.len() {
+            anyhow::bail!("표 {table_index}번 없음 (총 {}개)", tables.len());
         }
-        let hwp = self.hwp()?;
-        let act = hwp
-            .call("CreateAction", vec![Variant::String("ForwardFind".to_string())])?
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("ForwardFind 생성 실패"))?;
-        let ps = act
-            .call("CreateSet", vec![])?
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("CreateSet 실패"))?;
-        ps.call("SetItem", vec![
-            Variant::String("FindString".to_string()),
-            Variant::String(keyword.to_string()),
-        ])?;
-        ps.call("SetItem", vec![
-            Variant::String("IgnoreCase".to_string()),
-            Variant::Bool(true),
-        ])?;
-        ps.call("SetItem", vec![
-            Variant::String("Direction".to_string()),
-            Variant::I32(3),
-        ])?;
-        ps.call("SetItem", vec![
-            Variant::String("FindReplace".to_string()),
-            Variant::I32(0),
-        ])?;
-        let found = act
-            .call("Execute", vec![Variant::Object(ps)])?
-            .as_bool()
-            .unwrap_or(false);
+        let table = &tables[table_index];
+        let cell_text = table
+            .cells
+            .get(row)
+            .and_then(|r| r.get(col))
+            .map(|s| s.as_str())
+            .unwrap_or("");
+
+        // 원본 그대로 반환 (truncate 없음) — 요약/번역 등 전체 내용이 필요한 경우 사용
+        Ok(json!({
+            "table_index": table_index,
+            "row": row,
+            "col": col,
+            "text": cell_text,
+        }))
+    }
+
+    fn find_text_anchor(&self, keyword: &str) -> anyhow::Result<Value> {
+        // ForwardFind를 사용하지 않고 HTML 기반으로만 존재 여부 확인.
+        // ForwardFind는 단락 경계를 넘는 텍스트를 못 찾으면 "문서 마지막까지 찾으시겠습니까?"
+        // 다이얼로그를 띄워 COM을 블로킹하므로 이 함수에서는 사용하지 않음.
+        let found = self.text_exists(keyword);
         Ok(json!({"found": found, "keyword": keyword}))
     }
 
@@ -758,12 +586,44 @@ impl HwpController {
         } else {
             anyhow::bail!("mapping이 object여야 합니다 (받은 값: {mapping})");
         };
+        let html = self.get_html().unwrap_or_default();
         let mut results = vec![];
         for (pattern, value) in map {
             let val_str = value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string());
+
+            // \n 포함 패턴: HWP AllReplace는 단락 경계를 넘어 검색 불가
+            // 표 셀의 여러 단락에 걸친 내용은 fill_table_data_matrix를 사용해야 함
+            if pattern.contains('\n') {
+                results.push(format!(
+                    "⛔ '{}' — 검색어에 줄바꿈(\\n)이 포함되어 있습니다. \
+                    HWP는 단락 경계를 넘어 검색할 수 없습니다. \
+                    표 셀 전체 내용을 바꾸려면 fill_table_data_matrix를 사용하세요. \
+                    (get_all_tables_overview → 표·행 인덱스 확인 → fill_table_data_matrix)",
+                    truncate_chars(pattern, 40)
+                ));
+                continue;
+            }
+
+            // 긴 패턴 경고: 표 셀 내용 전체를 검색어로 쓰면 HWP FindReplace가 단락 구분자 때문에 실패함
+            let pattern_norm_chars: usize = pattern.split_whitespace().collect::<Vec<_>>().join(" ").chars().count();
+            if pattern_norm_chars > 80 {
+                results.push(format!(
+                    "⛔ '{}'... — 검색어가 너무 깁니다({pattern_norm_chars}자). \
+                    표 셀 내용 전체를 바꾸려면 fill_table_data_matrix를 사용하세요. \
+                    (get_all_tables_overview → 표 인덱스 확인 → fill_table_data_matrix)",
+                    truncate_chars(pattern, 30)
+                ));
+                continue;
+            }
+
+            // text_exists 사전 확인 후 skip 여부를 명시적으로 보고
+            if !html_contains_text(&html, pattern, true) {
+                results.push(format!("⚠️ '{}' 문서에서 찾을 수 없어 건너뜀", truncate_chars(pattern, 50)));
+                continue;
+            }
             match self.find_replace(pattern, &val_str, true) {
-                Ok(_) => results.push(format!("✅ '{pattern}' → '{val_str}'")),
-                Err(e) => results.push(format!("❌ '{pattern}': {e}")),
+                Ok(_) => results.push(format!("✅ '{}' → '{}'", truncate_chars(pattern, 40), truncate_chars(&val_str, 40))),
+                Err(e) => results.push(format!("❌ '{}': {e}", truncate_chars(pattern, 40))),
             }
         }
         Ok(results.join("\n"))
@@ -870,47 +730,130 @@ impl HwpController {
     }
 
     /// 특정 인덱스의 표로 커서를 이동합니다.
-    fn navigate_to_table(&self, table_index: usize) -> anyhow::Result<()> {
+    /// **반드시 col 0**의 셀 텍스트를 anchor로 사용하여 ForwardFind합니다.
+    /// 반환값: anchor가 위치한 행 인덱스 (fill_table_data_matrix에서 정확한 TableDownCell 수 계산에 사용)
+    fn navigate_to_table(&self, table_index: usize) -> anyhow::Result<usize> {
         let hwp = self.hwp()?;
+
+        // HTML에서 표 목록을 가져와 anchor 텍스트 결정
+        let html = self.get_html()?;
+        let tables = parse_tables_from_html(&html);
+
+        if table_index >= tables.len() {
+            anyhow::bail!("표 {table_index}번을 찾을 수 없습니다 (총 {}개)", tables.len());
+        }
+
+        let table = &tables[table_index];
+
+        // **col 0**에서만 anchor 선택 — TableDownCell이 col 0에서 출발해야 start_row 계산이 정확함
+        // col 0이 빈 행은 건너뛰고, 2자 이상인 첫 번째 행의 col 0 셀을 선택
+        let (anchor_row, anchor) = table
+            .cells
+            .iter()
+            .enumerate()
+            .find_map(|(row_idx, row)| {
+                let cell = row.get(0)?;
+                let text = cell.trim();
+                if text.len() >= 2 { Some((row_idx, text.to_string())) } else { None }
+            })
+            .ok_or_else(|| anyhow::anyhow!("표 {table_index}번 col 0에서 anchor를 찾을 수 없습니다"))?;
+
+        // HTML에서 텍스트 존재 여부 먼저 확인 (ForwardFind 블로킹 방지)
+        if !html_contains_text(&html, &anchor, false) {
+            anyhow::bail!("anchor 텍스트를 문서에서 찾을 수 없습니다: {anchor:?}");
+        }
+
         hwp.call("Run", vec![Variant::String("MoveDocBegin".to_string())])?;
 
-        let mut found_tables = 0usize;
-        for _ in 0..50_000 {
-            if self.is_cursor_in_table()? {
-                if found_tables == table_index {
-                    return Ok(());
-                }
-                // 이 표를 벗어나기
-                loop {
-                    let moved = hwp
-                        .call("Run", vec![Variant::String("MoveNextParaBegin".to_string())])
-                        .ok()
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    if !moved || !self.is_cursor_in_table()? {
-                        break;
-                    }
-                }
-                found_tables += 1;
-                continue;
+        let act = hwp
+            .call("CreateAction", vec![Variant::String("ForwardFind".to_string())])?
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("ForwardFind 생성 실패"))?;
+        let ps = act
+            .call("CreateSet", vec![])?
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("CreateSet 실패"))?;
+        ps.call("SetItem", vec![
+            Variant::String("FindString".to_string()),
+            Variant::String(anchor.clone()),
+        ])?;
+        ps.call("SetItem", vec![
+            Variant::String("IgnoreCase".to_string()),
+            Variant::Bool(false),
+        ])?;
+        ps.call("SetItem", vec![
+            Variant::String("Direction".to_string()),
+            Variant::I32(0),  // 0 = 문서 시작점에서 앞방향 (MoveDocBegin 이후)
+        ])?;
+        ps.call("SetItem", vec![
+            Variant::String("FindReplace".to_string()),
+            Variant::I32(0),
+        ])?;
+
+        let found = act
+            .call("Execute", vec![Variant::Object(ps)])?
+            .as_bool()
+            .unwrap_or(false);
+
+        if !found {
+            anyhow::bail!("ForwardFind로 anchor를 찾지 못했습니다: {anchor:?}");
+        }
+
+        // 커서가 anchor 텍스트 안에 있음 → anchor_row 반환
+        Ok(anchor_row)
+    }
+
+    /// (start_row, start_col)에 커서를 정확히 위치시킵니다.
+    ///
+    /// ## 전략: 물리 셀 오프셋 계산 + TableRightCell 걷기
+    ///
+    /// 1. HTML에서 표의 물리 셀 구조 (colspan/rowspan) 파싱
+    /// 2. navigate_to_table → anchor 행(col 0)에 커서 위치
+    /// 3. anchor 물리 offset과 target 물리 offset의 delta만큼 TableRightCell/TableLeftCell
+    ///
+    /// ForwardFind 기반 이전 방식 폐기: rowspan 표에서 오작동 (텍스트 중복, 빈 셀 등)
+    fn navigate_to_row_in_table(
+        &self,
+        table_index: usize,
+        start_row: usize,
+        _schema: &Value,   // 하위 호환 — 더 이상 사용 안 함
+        start_col: usize,
+    ) -> anyhow::Result<()> {
+        let html = self.get_html()?;
+        let raw_tables = parse_physical_tables(&html);
+        let raw = raw_tables
+            .get(table_index)
+            .ok_or_else(|| anyhow::anyhow!("표 {table_index}번 없음 (HTML에서 {}개 발견)", raw_tables.len()))?;
+
+        let target_offset = physical_cell_offset(raw, start_row, start_col)?;
+
+        // navigate_to_table은 anchor 행의 col 0에 커서를 위치시키고 anchor_row를 반환
+        let anchor_row = self.navigate_to_table(table_index)?;
+        let anchor_offset = physical_cell_offset(raw, anchor_row, 0)?;
+
+        let hwp = self.hwp()?;
+        let delta = target_offset as isize - anchor_offset as isize;
+
+        eprintln!("[NAV] table={table_index} anchor_row={anchor_row}(offset={anchor_offset}) → target({start_row},{start_col})(offset={target_offset}) delta={delta}");
+
+        if delta > 0 {
+            for _ in 0..delta {
+                hwp.call("Run", vec![Variant::String("TableRightCell".to_string())])?;
             }
-            let moved = hwp
-                .call("Run", vec![Variant::String("MoveNextParaBegin".to_string())])
-                .ok()
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if !moved {
-                break;
+        } else if delta < 0 {
+            for _ in 0..(-delta) {
+                hwp.call("Run", vec![Variant::String("TableLeftCell".to_string())])?;
             }
         }
 
-        anyhow::bail!("표 {table_index}번을 찾을 수 없습니다 (발견: {found_tables}개)")
+        Ok(())
     }
 
     fn fill_table_data_matrix(
         &self,
         table_index: usize,
         start_row: usize,
+        start_col: usize,
         matrix: &Value,
         cell_delay_secs: f64,
     ) -> anyhow::Result<String> {
@@ -920,77 +863,96 @@ impl HwpController {
         if total_rows == 0 {
             return Ok(format!("❌ 표 {table_index}번을 찾을 수 없습니다."));
         }
-        let cols = schema["cols"].as_u64().unwrap_or(0) as usize;
 
         let data_rows = matrix
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("matrix가 배열이어야 합니다"))?;
 
-        // 해당 표로 이동
-        self.navigate_to_table(table_index)?;
-
-        // 표 첫 셀로 이동
-        hwp.call("Run", vec![Variant::String("MoveTopLevelBegin".to_string())])?;
-
-        // start_row행 첫 열까지 이동
-        let tabs = start_row * cols;
-        for _ in 0..tabs {
-            hwp.call("Run", vec![Variant::String("TableRightCell".to_string())])?;
-        }
+        // 물리 셀 구조: colspan 연속 셀 skip 판단에 사용
+        let html = self.get_html()?;
+        let raw_tables = parse_physical_tables(&html);
 
         let mut filled = 0usize;
-        let mut skipped = vec![];
 
         for (r_offset, row_data) in data_rows.iter().enumerate() {
             let row_arr = match row_data.as_array() {
                 Some(a) => a,
                 None => continue,
             };
+            let current_row = start_row + r_offset;
+
+            // 각 행마다 독립적으로 navigate_to_row_in_table 호출.
+            // TableDownCell + TableLeftCell × N 방식은 colspan 표에서 오작동하므로 폐기.
+            self.navigate_to_row_in_table(table_index, current_row, &schema, start_col)?;
+
             for (c_idx, cell_val) in row_arr.iter().enumerate() {
-                if c_idx >= cols {
-                    skipped.push(format!("행{} col{} 열 범위 초과", start_row + r_offset, c_idx));
-                    continue;
+                let vcol = start_col + c_idx;
+                let cell_type = vcol_cell_type(&raw_tables, table_index, current_row, vcol);
+
+                // 다음 HWP 스텝이 필요한 셀이 남아 있는지 확인 (ColspanCont는 HWP 스텝 아님)
+                let has_more_hwp = ((c_idx + 1)..row_arr.len()).any(|ci| {
+                    vcol_cell_type(&raw_tables, table_index, current_row, start_col + ci)
+                        != VcolType::ColspanCont
+                });
+
+                match cell_type {
+                    VcolType::ColspanCont => {
+                        // 같은 물리 셀의 시각적 확장 — HWP 스텝 없으므로 쓰기/이동 모두 불필요
+                        continue;
+                    }
+                    VcolType::RowspanCont => {
+                        // 이전 행 rowspan의 재방문 셀 — HWP는 커서를 세우지만 쓰기는 건너뜀
+                        // 다음 셀로 가기 위해 TableRightCell만 수행
+                        if has_more_hwp {
+                            hwp.call("Run", vec![Variant::String("TableRightCell".to_string())])?;
+                        }
+                        continue;
+                    }
+                    VcolType::Physical => {
+                        // 실제 쓰기 대상 셀
+                        let new_text = cell_val
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| cell_val.to_string());
+
+                        hwp.call("Run", vec![Variant::String("SelectAll".to_string())])?;
+
+                        // \n 포함 시 단락 나누기를 삽입하며 여러 줄로 입력
+                        let lines: Vec<&str> = new_text.split('\n').collect();
+                        for (li, line) in lines.iter().enumerate() {
+                            let line_clean = line.trim_end_matches('\r').to_string();
+                            let ins = hwp
+                                .call("CreateAction", vec![Variant::String("InsertText".to_string())])?
+                                .as_object()
+                                .ok_or_else(|| anyhow::anyhow!("InsertText 생성 실패"))?;
+                            let ips = ins
+                                .call("CreateSet", vec![])?
+                                .as_object()
+                                .ok_or_else(|| anyhow::anyhow!("CreateSet 실패"))?;
+                            ips.call("SetItem", vec![
+                                Variant::String("Text".to_string()),
+                                Variant::String(line_clean),
+                            ])?;
+                            ins.call("Execute", vec![Variant::Object(ips)])?;
+                            if li < lines.len() - 1 {
+                                hwp.call("Run", vec![Variant::String("InsertReturn".to_string())])?;
+                            }
+                        }
+                        filled += 1;
+
+                        if cell_delay_secs > 0.0 {
+                            std::thread::sleep(Duration::from_secs_f64(cell_delay_secs));
+                        }
+
+                        if has_more_hwp {
+                            hwp.call("Run", vec![Variant::String("TableRightCell".to_string())])?;
+                        }
+                    }
                 }
-                let new_text = cell_val
-                    .as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| cell_val.to_string());
-
-                hwp.call("Run", vec![Variant::String("SelectAll".to_string())])?;
-
-                let ins = hwp
-                    .call("CreateAction", vec![Variant::String("InsertText".to_string())])?
-                    .as_object()
-                    .ok_or_else(|| anyhow::anyhow!("InsertText 생성 실패"))?;
-                let ips = ins
-                    .call("CreateSet", vec![])?
-                    .as_object()
-                    .ok_or_else(|| anyhow::anyhow!("CreateSet 실패"))?;
-                ips.call("SetItem", vec![
-                    Variant::String("Text".to_string()),
-                    Variant::String(new_text),
-                ])?;
-                ins.call("Execute", vec![Variant::Object(ips)])?;
-                filled += 1;
-
-                if cell_delay_secs > 0.0 {
-                    std::thread::sleep(Duration::from_secs_f64(cell_delay_secs));
-                }
-
-                if c_idx < row_arr.len() - 1 {
-                    hwp.call("Run", vec![Variant::String("TableRightCell".to_string())])?;
-                }
-            }
-            if r_offset < data_rows.len() - 1 {
-                hwp.call("Run", vec![Variant::String("TableRightCell".to_string())])?;
             }
         }
 
-        let mut msg = format!("✅ {filled}개 셀 채움");
-        if !skipped.is_empty() {
-            msg.push_str(&format!("\n⚠️ 건너뜀: {}", skipped[..skipped.len().min(5)].join(", ")));
-        }
-        Ok(msg)
+        Ok(format!("✅ {filled}개 셀 채움"))
     }
 
     fn format_table_cells(&self, _table_index: usize, format_dict: &Value) -> anyhow::Result<String> {
@@ -1265,17 +1227,18 @@ impl HwpController {
             }
         }
 
-        let paragraphs = self.scan_all_text().unwrap_or_default();
-        if !paragraphs.is_empty() {
-            let text = paragraphs.join("\n");
-            let truncated = if text.chars().count() > 2000 {
-                format!("{}...", text.chars().take(2000).collect::<String>())
-            } else {
-                text
-            };
-            lines.push(String::new());
-            lines.push("=== 본문 텍스트 ===".to_string());
-            lines.push(truncated);
+        if let Ok(html) = self.get_html() {
+            let plain = html_to_plain_text(&html);
+            if !plain.is_empty() {
+                let truncated = if plain.chars().count() > 2000 {
+                    format!("{}...", plain.chars().take(2000).collect::<String>())
+                } else {
+                    plain
+                };
+                lines.push(String::new());
+                lines.push("=== 본문 텍스트 ===".to_string());
+                lines.push(truncated);
+            }
         }
 
         lines.join("\n")
@@ -1288,11 +1251,18 @@ impl HwpController {
             "analyze_document_structure" => {
                 Ok(self.analyze_document_structure()?.to_string())
             }
+            "get_document_text" => Ok(self.get_document_text()?.to_string()),
             "get_field_info" => Ok(self.get_field_info()?.to_string()),
             "get_all_tables_overview" => Ok(self.get_all_tables_overview()?.to_string()),
             "get_table_schema" => {
                 let idx = args["table_index"].as_u64().unwrap_or(0) as usize;
                 Ok(self.get_table_schema(idx)?.to_string())
+            }
+            "get_cell_text" => {
+                let idx = args["table_index"].as_u64().unwrap_or(0) as usize;
+                let row = args["row"].as_u64().unwrap_or(0) as usize;
+                let col = args["col"].as_u64().unwrap_or(0) as usize;
+                Ok(self.get_cell_text(idx, row, col)?.to_string())
             }
             "find_text_anchor" => {
                 let kw = args["keyword"].as_str().unwrap_or("");
@@ -1307,11 +1277,14 @@ impl HwpController {
                 self.fill_field_data(data_map)
             }
             "replace_text_patterns" => {
-                let mapping = if args.get("mapping").is_some() && !args["mapping"].is_null() {
-                    &args["mapping"]
-                } else {
-                    args
-                };
+                // "mapping" / "replacements" / "patterns" 키 모두 수용
+                let mapping = ["mapping", "replacements", "patterns"]
+                    .iter()
+                    .find_map(|k| {
+                        let v = args.get(*k)?;
+                        if v.is_null() { None } else { Some(v) }
+                    })
+                    .unwrap_or(args);
                 self.replace_text_patterns(mapping)
             }
             "set_checkbox_state" => {
@@ -1334,13 +1307,14 @@ impl HwpController {
             "fill_table_data_matrix" => {
                 let ti = args["table_index"].as_u64().unwrap_or(0) as usize;
                 let sr = args["start_row"].as_u64().unwrap_or(1) as usize;
+                let sc = args["start_col"].as_u64().unwrap_or(0) as usize;
                 let mtx = &args["matrix"];
                 let delay = args["cell_delay"].as_f64().unwrap_or(0.0);
-                self.fill_table_data_matrix(ti, sr, mtx, delay)
+                self.fill_table_data_matrix(ti, sr, sc, mtx, delay)
             }
             "format_table_cells" => {
                 let ti = args["table_index"].as_u64().unwrap_or(0) as usize;
-                let fmt = &args["format"];
+                let fmt = args.get("format_dict").unwrap_or(&Value::Null);
                 self.format_table_cells(ti, fmt)
             }
             "set_font_style" => {
@@ -1372,6 +1346,392 @@ impl HwpController {
                 let ai = args["action_id"].as_str().unwrap_or("");
                 self.execute_raw_action(ai, args.get("params"))
             }
+
+            // ── 진단 도구 (ToolTestPage 전용) ─────────────────────────
+            "diag_raw_html" => {
+                let html = self.get_html()?;
+                let limit = args["limit"].as_u64().unwrap_or(3000) as usize;
+                let lower = html.to_lowercase();
+                let preview: String = html.chars().take(limit).collect();
+                Ok(json!({
+                    "total_bytes": html.len(),
+                    "total_chars": html.chars().count(),
+                    "table_tag_count": lower.matches("<table").count(),
+                    "tr_tag_count": lower.matches("<tr").count(),
+                    "td_tag_count": lower.matches("<td").count(),
+                    "p_tag_count": lower.matches("<p").count(),
+                    "br_tag_count": lower.matches("<br").count(),
+                    "preview": preview,
+                }).to_string())
+            }
+            "diag_text_file_txt" => {
+                // GetTextFile("TEXT") — HTML 파싱 없는 대안. 탭(\t)으로 셀 구분.
+                let hwp = self.hwp()?;
+                let result = hwp.call(
+                    "GetTextFile",
+                    vec![
+                        Variant::String("TEXT".to_string()),
+                        Variant::String(String::new()),
+                    ],
+                )?;
+                let text = result.to_string_repr();
+                let limit = args["limit"].as_u64().unwrap_or(3000) as usize;
+                let preview: String = text.chars().take(limit).collect();
+                // 이스케이프 시각화 (\t \r \n 명시)
+                let escaped: String = text.chars().take(limit).map(|c| match c {
+                    '\n' => "↵\n".to_string(),
+                    '\r' => "⏎".to_string(),
+                    '\t' => "→\t".to_string(),
+                    c    => c.to_string(),
+                }).collect();
+                Ok(json!({
+                    "total_chars": text.chars().count(),
+                    "preview_plain": preview,
+                    "preview_escaped": escaped,
+                }).to_string())
+            }
+            "diag_normalize_keyword" => {
+                // html_contains_text 내부 정규화를 시뮬레이션하여
+                // "false positive" 가능성을 진단합니다.
+                let keyword = args["keyword"].as_str().unwrap_or("");
+                let html = self.get_html()?;
+                let plain = html_to_plain_text(&html);
+                let normalize = |s: &str| -> String {
+                    s.split_whitespace().collect::<Vec<_>>().join(" ")
+                };
+                let kw_norm   = normalize(keyword);
+                let plain_norm = normalize(&plain);
+                let found_norm = plain_norm.to_lowercase().contains(&kw_norm.to_lowercase());
+                let found_raw  = plain.contains(keyword);
+                Ok(json!({
+                    "keyword_raw":         keyword,
+                    "keyword_normalized":  kw_norm,
+                    "found_by_html_check": found_norm,
+                    "found_raw_in_plain":  found_raw,
+                    // true = html_contains_text가 "있다"고 판단하지만 실제로는 단락 경계에 걸려있을 가능성
+                    "false_positive_risk": found_norm && !found_raw,
+                }).to_string())
+            }
+            "diag_cell_raw" => {
+                // 특정 셀의 원시 텍스트를 이스케이프 표기로 반환.
+                // \n \r \t 가 실제로 어떻게 들어있는지 확인.
+                let ti  = args["table_index"].as_u64().unwrap_or(0) as usize;
+                let row = args["row"].as_u64().unwrap_or(0) as usize;
+                let col = args["col"].as_u64().unwrap_or(0) as usize;
+                let tables = self.scan_tables()?;
+                if ti >= tables.len() {
+                    anyhow::bail!("표 {ti}번 없음 (총 {}개)", tables.len());
+                }
+                let cell = tables[ti]
+                    .cells.get(row).and_then(|r| r.get(col))
+                    .map(|s| s.as_str()).unwrap_or("");
+                let escaped: String = cell.chars().map(|c| match c {
+                    '\n' => "\\n".to_string(),
+                    '\r' => "\\r".to_string(),
+                    '\t' => "\\t".to_string(),
+                    c    => c.to_string(),
+                }).collect();
+                Ok(json!({
+                    "table_index": ti, "row": row, "col": col,
+                    "char_count":  cell.chars().count(),
+                    "has_newline": cell.contains('\n'),
+                    "has_cr":      cell.contains('\r'),
+                    "has_tab":     cell.contains('\t'),
+                    "raw_escaped": escaped,
+                    "actual":      cell,
+                }).to_string())
+            }
+            "diag_html_table_extract" => {
+                // 특정 표의 원시 HTML 청크를 추출합니다.
+                // parse_tables_from_html이 어떤 HTML을 처리하는지 직접 확인용.
+                let target = args["table_index"].as_u64().unwrap_or(0) as usize;
+                let limit  = args["limit"].as_u64().unwrap_or(2000) as usize;
+                let html   = self.get_html()?;
+                let lower  = html.to_lowercase();
+                let mut count = 0usize;
+                let mut depth = 0i32;
+                let mut start_pos: Option<usize> = None;
+                let mut i = 0usize;
+                loop {
+                    let next_tag = match lower[i..].find('<') {
+                        Some(off) => i + off,
+                        None => break,
+                    };
+                    let tag_end = match lower[next_tag..].find('>') {
+                        Some(off) => next_tag + off + 1,
+                        None => break,
+                    };
+                    let tag_inner = lower[next_tag + 1..tag_end - 1].trim();
+                    let closing   = tag_inner.starts_with('/');
+                    let tag_name  = if closing {
+                        tag_inner.trim_start_matches('/').split_whitespace().next().unwrap_or("")
+                    } else {
+                        tag_inner.split_whitespace().next().unwrap_or("")
+                    };
+                    if tag_name == "table" && !closing {
+                        if depth == 0 {
+                            if count == target { start_pos = Some(next_tag); }
+                            count += 1;
+                        }
+                        depth += 1;
+                    } else if tag_name == "table" && closing {
+                        depth -= 1;
+                        if depth == 0 {
+                            if let Some(sp) = start_pos {
+                                let raw = &html[sp..tag_end];
+                                let preview: String = raw.chars().take(limit).collect();
+                                return Ok(json!({
+                                    "table_index": target,
+                                    "raw_html_chars": raw.chars().count(),
+                                    "preview": preview,
+                                }).to_string());
+                            }
+                        }
+                    }
+                    i = tag_end;
+                }
+                Ok(json!({"error": format!("표 {target}번 없음 (총 {count}개)")}).to_string())
+            }
+            "diag_initscan_gettext" => {
+                // InitScan → GetText → ReleaseScan API 테스트.
+                // VT_BYREF output param을 COM 레이어가 지원하는지 확인합니다.
+                let hwp = self.hwp()?;
+                let init_res = hwp.call("InitScan", vec![
+                    Variant::I32(0), // Range=0: 전체
+                    Variant::I32(0), // Direction=0: 정방향
+                ])?;
+                let init_str = init_res.to_string_repr();
+                // GetText는 (상태코드, 텍스트) 두 output param을 VT_BYREF로 반환 —
+                // com_dispatch 레이어가 지원하면 텍스트가 들어옴
+                let gettext_res = hwp.call("GetText", vec![]);
+                let _ = hwp.call("ReleaseScan", vec![]);
+                match gettext_res {
+                    Ok(v)  => Ok(json!({
+                        "init_result":   init_str,
+                        "gettext_value": v.to_string_repr(),
+                        "verdict": "GetText COM 호출 성공 — 반환값 확인 필요",
+                    }).to_string()),
+                    Err(e) => Ok(json!({
+                        "init_result":  init_str,
+                        "gettext_error": e.to_string(),
+                        "verdict": "GetText COM 호출 실패 (VT_BYREF 미지원 가능성)",
+                    }).to_string()),
+                }
+            }
+
+            "diag_get_pos" => {
+                // hwp.GetPos() VT_BYREF 테스트: 현재 커서 좌표 반환
+                let hwp = self.hwp()?;
+                match hwp.get_pos() {
+                    Ok((list, para, pos)) => Ok(json!({
+                        "list": list,
+                        "para": para,
+                        "pos": pos,
+                        "verdict": if list == 0 && para == 0 && pos == 0 {
+                            "모두 0 — 커서가 맨 앞이거나 VT_BYREF 미작동"
+                        } else {
+                            "비영값 수신 — VT_BYREF 정상 작동"
+                        }
+                    }).to_string()),
+                    Err(e) => Ok(json!({ "error": e.to_string() }).to_string()),
+                }
+            }
+
+            "diag_key_indicator" => {
+                // KeyIndicator: HWP는 output param이 있으므로 두 방식 모두 시도
+                let hwp = self.hwp()?;
+                // 방식A: 인자 0개로 call (반환값에 정보 없을 수 있음)
+                let call0 = hwp.call("KeyIndicator", vec![])
+                    .map(|v| v.to_string_repr())
+                    .map_err(|e| e.to_string());
+                // 방식B: VT_BYREF 10개 (이전 실패 — 참고용)
+                let byref10 = hwp.key_indicator()
+                    .map_err(|e| e.to_string());
+                Ok(json!({
+                    "call_0args": call0,
+                    "byref_10args": byref10,
+                    "note": "call_0args가 성공하면 반환 VARIANT 값 확인, byref_10args는 파라미터 수 문제로 실패 예상"
+                }).to_string())
+            }
+
+            "diag_set_pos" => {
+                // hwp.SetPos(list, para, pos) 테스트: 지정 좌표로 커서 이동
+                let list = args["list"].as_i64().unwrap_or(0) as i32;
+                let para = args["para"].as_i64().unwrap_or(0) as i32;
+                let pos  = args["pos"].as_i64().unwrap_or(0) as i32;
+                let hwp = self.hwp()?;
+                let before = hwp.get_pos().ok();
+                let result = hwp.set_pos(list, para, pos);
+                let after  = hwp.get_pos().ok();
+                match result {
+                    Ok(ok) => Ok(json!({
+                        "set_pos_result": ok,
+                        "before": before.map(|(l,p,po)| json!({"list":l,"para":p,"pos":po})),
+                        "after":  after.map(|(l,p,po)|  json!({"list":l,"para":p,"pos":po})),
+                        "verdict": if ok { "SetPos 성공" } else { "SetPos false 반환" },
+                    }).to_string()),
+                    Err(e) => Ok(json!({ "error": e.to_string() }).to_string()),
+                }
+            }
+
+            "diag_initscan_1param" => {
+                // InitScan 파라미터 개수 탐색 + CreateAction 방식도 시도
+                let hwp = self.hwp()?;
+                // 1개 파라미터
+                let r1 = hwp.call("InitScan", vec![Variant::I32(0x37)]);
+                let _ = hwp.call("ReleaseScan", vec![]);
+                // 0개 파라미터
+                let r2 = hwp.call("InitScan", vec![]);
+                let _ = hwp.call("ReleaseScan", vec![]);
+                // 3개 파라미터 (Range, Direction, 추가 플래그)
+                let r3 = hwp.call("InitScan", vec![
+                    Variant::I32(0), Variant::I32(0), Variant::I32(0),
+                ]);
+                let _ = hwp.call("ReleaseScan", vec![]);
+                // CreateAction 방식 시도
+                let r_action = hwp.call("CreateAction", vec![Variant::String("InitScan".to_string())])
+                    .map(|v| v.to_string_repr())
+                    .map_err(|e| e.to_string());
+                Ok(json!({
+                    "1param_0x37": r1.map(|v| v.to_string_repr()).map_err(|e| e.to_string()),
+                    "0param":      r2.map(|v| v.to_string_repr()).map_err(|e| e.to_string()),
+                    "3params":     r3.map(|v| v.to_string_repr()).map_err(|e| e.to_string()),
+                    "create_action": r_action,
+                }).to_string())
+            }
+
+            "diag_scan_table_positions" => {
+                // InitScan → GetText+GetPos 루프로 셀 위치 맵 구축
+                let hwp = self.hwp()?;
+
+                // InitScan: 2개 파라미터 (Range=0 전체, Direction=0 정방향)
+                let init_result = hwp.call("InitScan", vec![
+                    Variant::I32(0), // Range
+                    Variant::I32(0), // Direction
+                ])?;
+                let init_str = init_result.to_string_repr();
+
+                let mut entries: Vec<serde_json::Value> = Vec::new();
+                let mut call_count = 0;
+                let max_calls = 500;
+
+                loop {
+                    if call_count >= max_calls { break; }
+                    call_count += 1;
+
+                    match hwp.get_text_scan() {
+                        Err(e) => {
+                            entries.push(json!({ "error": e.to_string(), "call": call_count }));
+                            break;
+                        }
+                        Ok((text_state, text, ret_code)) => {
+                            if ret_code == 0 || text_state == 0 { break; }
+                            let pos_info = hwp.get_pos().ok()
+                                .map(|(l,p,po)| json!({"list":l,"para":p,"pos":po}));
+                            let preview: String = text.chars().take(40).collect();
+                            entries.push(json!({
+                                "call": call_count,
+                                "text_state": text_state,
+                                "text": preview,
+                                "ret_code": ret_code,
+                                "pos": pos_info,
+                            }));
+                            if entries.len() >= 30 { break; }
+                        }
+                    }
+                }
+
+                let _ = hwp.call("ReleaseScan", vec![]);
+                Ok(json!({
+                    "init_result": init_str,
+                    "total_calls": call_count,
+                    "entries": entries,
+                }).to_string())
+            }
+
+            "diag_table_cell_walk" => {
+                // TableRightCell + GetPos로 표의 모든 물리 셀 좌표를 기록합니다.
+                // navigate_to_table → TableRightCell 반복 → GetPos 수집
+                // SetPos 기반 셀 이동의 핵심 데이터 수집용.
+                let table_index = args["table_index"].as_u64().unwrap_or(0) as usize;
+                let hwp = self.hwp()?;
+
+                // 표 첫 셀로 이동
+                self.navigate_to_table(table_index)?;
+
+                let first_pos = hwp.get_pos()?;
+                let mut cells: Vec<serde_json::Value> = vec![
+                    json!({ "phys_idx": 0, "pos": {"list": first_pos.0, "para": first_pos.1, "pos": first_pos.2} })
+                ];
+
+                // Run("TableRightCell")로 순회 (최대 200 셀)
+                // TableRightCell은 직접 메서드가 아닌 HAction ID
+                for i in 1..200usize {
+                    let moved = hwp.call("Run", vec![
+                        Variant::String("TableRightCell".to_string()),
+                    ])?;
+                    // false 또는 Empty 반환 = 표 끝
+                    if !moved.as_bool().unwrap_or(true) { break; }
+                    let p = hwp.get_pos()?;
+                    cells.push(json!({
+                        "phys_idx": i,
+                        "pos": { "list": p.0, "para": p.1, "pos": p.2 }
+                    }));
+                    if cells.len() >= 100 { break; }
+                }
+
+                Ok(json!({
+                    "table_index": table_index,
+                    "physical_cells_found": cells.len(),
+                    "cells": cells,
+                }).to_string())
+            }
+
+            "diag_phys_structure" => {
+                // parse_physical_tables 결과 + physical_cell_offset 계산을 노출합니다.
+                // 실제 navigation 계산이 맞는지 확인용.
+                let table_index = args["table_index"].as_u64().unwrap_or(0) as usize;
+                let target_row  = args["target_row"].as_u64().unwrap_or(4) as usize;
+                let target_col  = args["target_col"].as_u64().unwrap_or(2) as usize;
+
+                let html = self.get_html()?;
+                let raw_tables = parse_physical_tables(&html);
+                let raw = match raw_tables.get(table_index) {
+                    Some(r) => r,
+                    None => return Ok(json!({"error": format!("표 {}번 없음", table_index)}).to_string()),
+                };
+
+                // 각 행의 물리 셀 수와 (colspan, rowspan)
+                let rows_info: Vec<serde_json::Value> = raw.iter().enumerate().map(|(r, row)| {
+                    let cells: Vec<serde_json::Value> = row.iter().map(|&(cs, rs)| json!({"colspan":cs,"rowspan":rs})).collect();
+                    json!({"row": r, "phys_count": row.len(), "cells": cells})
+                }).collect();
+
+                // physical_cell_offset for anchor (row 0, col 0)
+                let anchor_offset_res = physical_cell_offset(raw, 0, 0);
+                // physical_cell_offset for target
+                let target_offset_res = physical_cell_offset(raw, target_row, target_col);
+                let delta = match (&anchor_offset_res, &target_offset_res) {
+                    (Ok(a), Ok(t)) => Some(*t as isize - *a as isize),
+                    _ => None,
+                };
+
+                // is_vcol_continuation for each vcol in target_row (0..7)
+                let continuation_map: Vec<serde_json::Value> = (0..8usize).map(|vc| {
+                    json!({"vcol": vc, "is_continuation": is_vcol_continuation(&raw_tables, table_index, target_row, vc)})
+                }).collect();
+
+                Ok(json!({
+                    "table_index": table_index,
+                    "total_rows": raw.len(),
+                    "rows_physical": rows_info,
+                    "anchor_offset": anchor_offset_res.map_err(|e| e.to_string()),
+                    "target_offset": target_offset_res.map_err(|e| e.to_string()),
+                    "delta_tableright": delta,
+                    "continuation_map": continuation_map,
+                }).to_string())
+            }
+
             other => Ok(format!("❌ 알 수 없는 도구: {other}")),
         }
     }
@@ -1387,34 +1747,477 @@ struct TableData {
     cells: Vec<Vec<String>>,
 }
 
-// ──────────────────────────────────────────────────────────────
-// 헬퍼 함수
+// ──────────────────────────────────────────────────────────���───
+// HTML 파싱 헬퍼 (Python PoC의 _parse_all_tables / _text_exists 포트)
 // ──────────────────────────────────────────────────────────────
 
-/// GetText 반환값에서 (state, text) 추출
-/// HWP COM GetText()는 다양한 형태로 반환할 수 있음:
-/// - 튜플 (i32, String)
-/// - 또는 문자열 표현
-fn parse_gettext_result(variant: &Variant, repr: &str) -> (i32, String) {
-    // Variant가 직접 튜플이면
-    if let Some(n) = variant.as_i32() {
-        return (n, String::new());
+/// HTML에서 모든 최상위 `<table>` 을 파싱하여 TableData 목록으로 반환합니다.
+///
+/// colspan / rowspan 을 처리하여 시각적 그리드 좌표와 일치하는 cells 배열을 반환합니다.
+/// HWP HTML은 `<br>` 없이 `<p>` 태그로 단락을 구분하므로, `<p>` 시작 시 '\n' 구분자를 삽입합니다.
+fn parse_tables_from_html(html: &str) -> Vec<TableData> {
+    let lower = html.to_lowercase();
+    let mut tables: Vec<TableData> = Vec::new();
+    let mut depth = 0i32;
+
+    // raw_rows: (cell_text, colspan, rowspan) 의 행 목록
+    let mut raw_rows: Vec<Vec<(String, usize, usize)>> = Vec::new();
+    let mut cur_row: Vec<(String, usize, usize)> = Vec::new();
+    let mut in_cell = false;
+    let mut cell_buf = String::new();
+    let mut cur_colspan = 1usize;
+    let mut cur_rowspan = 1usize;
+    let mut i = 0usize;
+
+    while i < html.len() {
+        let next_tag = match lower[i..].find('<') {
+            Some(off) => i + off,
+            None => {
+                if in_cell && depth == 1 { cell_buf.push_str(&html[i..]); }
+                break;
+            }
+        };
+
+        if in_cell && depth == 1 && next_tag > i {
+            cell_buf.push_str(&html[i..next_tag]);
+        }
+
+        let tag_end = match lower[next_tag..].find('>') {
+            Some(off) => next_tag + off + 1,
+            None => break,
+        };
+
+        let tag_inner = lower[next_tag + 1..tag_end - 1].trim();
+        let closing = tag_inner.starts_with('/');
+        let tag_name = if closing {
+            tag_inner.trim_start_matches('/').split_whitespace().next().unwrap_or("")
+        } else {
+            tag_inner.split_whitespace().next().unwrap_or("")
+        };
+
+        match (tag_name, closing) {
+            ("table", false) => {
+                depth += 1;
+                if depth == 1 {
+                    raw_rows.clear();
+                    cur_row.clear();
+                    in_cell = false;
+                    cell_buf.clear();
+                }
+            }
+            ("table", true) => {
+                if depth == 1 {
+                    if in_cell {
+                        cur_row.push((decode_html_entities(cell_buf.trim()), cur_colspan, cur_rowspan));
+                        cell_buf.clear(); in_cell = false;
+                    }
+                    if !cur_row.is_empty() { raw_rows.push(std::mem::take(&mut cur_row)); }
+                    if !raw_rows.is_empty() {
+                        let grid = expand_grid_with_spans(&raw_rows);
+                        let row_count = grid.len();
+                        let col_count = grid.iter().map(|r| r.len()).max().unwrap_or(0);
+                        tables.push(TableData { rows: row_count, cols: col_count, cells: grid });
+                        raw_rows.clear();
+                    }
+                }
+                depth -= 1;
+            }
+            ("tr", false) => {
+                if depth == 1 && !cur_row.is_empty() {
+                    raw_rows.push(std::mem::take(&mut cur_row));
+                }
+            }
+            ("tr", true) => {
+                if depth == 1 {
+                    if in_cell {
+                        cur_row.push((decode_html_entities(cell_buf.trim()), cur_colspan, cur_rowspan));
+                        cell_buf.clear(); in_cell = false;
+                    }
+                    if !cur_row.is_empty() { raw_rows.push(std::mem::take(&mut cur_row)); }
+                }
+            }
+            ("td", false) | ("th", false) if depth == 1 => {
+                in_cell = true;
+                cell_buf.clear();
+                cur_colspan = parse_span_attr(tag_inner, "colspan").max(1);
+                cur_rowspan = parse_span_attr(tag_inner, "rowspan").max(1);
+            }
+            ("td", true) | ("th", true) if depth == 1 && in_cell => {
+                cur_row.push((decode_html_entities(cell_buf.trim()), cur_colspan, cur_rowspan));
+                cell_buf.clear(); in_cell = false;
+                cur_colspan = 1; cur_rowspan = 1;
+            }
+            // HWP HTML은 <p> 태그로 셀 내 단락을 구분합니다 (<br> 미사용).
+            // <p> 열릴 때 기존 내용이 있으면 '\n' 구분자를 삽입합니다.
+            ("p", false) if in_cell && depth == 1 => {
+                let trimmed = cell_buf.trim_end().to_string();
+                if !trimmed.is_empty() {
+                    cell_buf = trimmed;
+                    cell_buf.push('\n');
+                }
+            }
+            ("br", _) if in_cell && depth == 1 => {
+                cell_buf.push('\n');
+            }
+            _ => {}
+        }
+
+        i = tag_end;
     }
-    // 문자열 표현에서 파싱 시도: "(1, 텍스트)" 형태
-    let trimmed = repr.trim();
-    if trimmed.starts_with('(') && trimmed.contains(',') {
-        let inner = trimmed.trim_start_matches('(').trim_end_matches(')');
-        if let Some((state_part, text_part)) = inner.split_once(',') {
-            if let Ok(state) = state_part.trim().parse::<i32>() {
-                return (state, text_part.trim().trim_matches('"').trim_matches('\'').to_string());
+
+    tables
+}
+
+/// 시각적 열 vcol의 HWP 물리 셀 유형을 반환합니다.
+///
+/// - Physical   : 이 행에서 새로 시작하는 HTML `<td>` — 커서가 멈추는 독립 셀
+/// - RowspanCont: 이전 행의 rowspan이 이 행까지 연장되는 셀 — HWP는 이 셀에도 커서를 세움
+/// - ColspanCont: 같은 행 colspan 확장 열 — HWP는 이 위치를 별개 셀로 취급하지 않음
+#[derive(Debug, PartialEq, Eq)]
+enum VcolType {
+    Physical,
+    RowspanCont,
+    ColspanCont,
+}
+
+fn vcol_cell_type(
+    raw_tables: &[Vec<Vec<(usize, usize)>>],
+    table_index: usize,
+    row_idx: usize,
+    target_vcol: usize,
+) -> VcolType {
+    let raw = match raw_tables.get(table_index) {
+        Some(t) => t,
+        None => return VcolType::Physical,
+    };
+
+    // pending: first_vcol → (remaining_rows, colspan)
+    let mut pending: std::collections::BTreeMap<usize, (usize, usize)> = Default::default();
+
+    for r in 0..=row_idx {
+        let row = match raw.get(r) {
+            Some(row) => row,
+            None => return VcolType::Physical,
+        };
+
+        let mut vc = 0usize;
+        let mut html_idx = 0usize;
+
+        loop {
+            if let Some(&(_rem, cs)) = pending.get(&vc) {
+                if r == row_idx && target_vcol >= vc && target_vcol < vc + cs {
+                    // target_vcol == vc : HWP 커서가 멈추는 첫 번째 vcol → RowspanCont
+                    // target_vcol  > vc : 같은 셀의 colspan 내부 → ColspanCont (HWP 스텝 아님)
+                    return if target_vcol == vc { VcolType::RowspanCont } else { VcolType::ColspanCont };
+                }
+                vc += cs;
+            } else if html_idx < row.len() {
+                let (cs, rs) = row[html_idx];
+                html_idx += 1;
+                if r == row_idx {
+                    if target_vcol == vc { return VcolType::Physical; }
+                    if target_vcol > vc && target_vcol < vc + cs { return VcolType::ColspanCont; }
+                }
+                if rs > 1 { pending.insert(vc, (rs, cs)); }
+                vc += cs;
+            } else {
+                let next_pend = pending.keys().find(|&&k| k >= vc).copied();
+                match next_pend {
+                    Some(pvc) => { vc = pvc; }
+                    None => break,
+                }
             }
         }
+
+        if r < row_idx {
+            let mut new_p: std::collections::BTreeMap<usize, (usize, usize)> = Default::default();
+            for (k, (rem, cs)) in pending {
+                if rem > 1 { new_p.insert(k, (rem - 1, cs)); }
+            }
+            pending = new_p;
+        }
     }
-    // 숫자만 있으면 state
-    if let Ok(n) = trimmed.parse::<i32>() {
-        return (n, String::new());
+
+    VcolType::Physical
+}
+
+/// ColspanCont 여부만 반환합니다 (diag_phys_structure 출력용).
+/// RowspanCont는 HWP 물리 셀이므로 false 반환.
+fn is_vcol_continuation(
+    raw_tables: &[Vec<Vec<(usize, usize)>>],
+    table_index: usize,
+    row_idx: usize,
+    vcol: usize,
+) -> bool {
+    matches!(vcol_cell_type(raw_tables, table_index, row_idx, vcol), VcolType::ColspanCont)
+}
+
+/// HTML에서 각 표의 물리 셀 구조를 파싱합니다. (colspan, rowspan)만 추출.
+/// 반환: tables[table_idx][row_idx][phys_col_idx] = (colspan, rowspan)
+fn parse_physical_tables(html: &str) -> Vec<Vec<Vec<(usize, usize)>>> {
+    let lower = html.to_lowercase();
+    let mut tables: Vec<Vec<Vec<(usize, usize)>>> = Vec::new();
+    let mut depth = 0i32;
+    let mut cur_table: Vec<Vec<(usize, usize)>> = Vec::new();
+    let mut cur_row: Vec<(usize, usize)> = Vec::new();
+    let mut in_row = false;
+    let mut i = 0usize;
+
+    while let Some(off) = lower[i..].find('<') {
+        let start = i + off;
+        let end = match lower[start..].find('>') {
+            Some(o) => start + o + 1,
+            None => break,
+        };
+        let tag_inner = lower[start + 1..end - 1].trim();
+        let closing = tag_inner.starts_with('/');
+        let tag_name = if closing {
+            tag_inner.trim_start_matches('/').split_whitespace().next().unwrap_or("")
+        } else {
+            tag_inner.split_whitespace().next().unwrap_or("")
+        };
+
+        match (tag_name, closing) {
+            ("table", false) => {
+                depth += 1;
+                if depth == 1 {
+                    cur_table.clear();
+                    in_row = false;
+                }
+            }
+            ("table", true) => {
+                if depth == 1 {
+                    if in_row && !cur_row.is_empty() {
+                        cur_table.push(std::mem::take(&mut cur_row));
+                    }
+                    tables.push(std::mem::take(&mut cur_table));
+                }
+                depth -= 1;
+            }
+            ("tr", false) if depth == 1 => {
+                if in_row && !cur_row.is_empty() {
+                    cur_table.push(std::mem::take(&mut cur_row));
+                }
+                in_row = true;
+            }
+            ("tr", true) if depth == 1 => {
+                if !cur_row.is_empty() {
+                    cur_table.push(std::mem::take(&mut cur_row));
+                }
+                in_row = false;
+            }
+            ("td", false) | ("th", false) if depth == 1 && in_row => {
+                let orig_tag = &html[start..end];
+                let orig_lower = orig_tag.to_lowercase();
+                let colspan = parse_span_attr(&orig_lower, "colspan").max(1);
+                let rowspan = parse_span_attr(&orig_lower, "rowspan").max(1);
+                cur_row.push((colspan, rowspan));
+            }
+            _ => {}
+        }
+
+        i = end;
     }
-    // 그 외: 텍스트로 간주
-    (1, repr.to_string())
+
+    tables
+}
+
+/// 표 첫 셀(물리 오프셋 0)부터 시각적 (target_row, target_vcol)까지
+/// TableRightCell 이동 횟수를 계산합니다.
+///
+/// HWP는 rowspan 셀을 span 하는 모든 행에서 다시 방문합니다.
+/// 따라서 각 행의 HWP 스텝 수 = (해당 행의 active pending rowspan 셀 수) + (HTML <td> 수)
+/// ColspanCont는 HWP 스텝이 아니므로 count 0.
+fn physical_cell_offset(
+    raw: &[Vec<(usize, usize)>],
+    target_row: usize,
+    target_vcol: usize,
+) -> anyhow::Result<usize> {
+    // pending: first_vcol → (remaining_rows, colspan)
+    let mut pending: std::collections::BTreeMap<usize, (usize, usize)> = Default::default();
+    let mut total = 0usize;
+
+    for row_idx in 0..=target_row {
+        let row = raw.get(row_idx)
+            .ok_or_else(|| anyhow::anyhow!("row {} out of bounds (table has {} rows)", row_idx, raw.len()))?;
+
+        let mut hwp_step = 0usize;
+        let mut vc = 0usize;
+        let mut html_idx = 0usize;
+        let mut found_step: Option<usize> = None;
+
+        loop {
+            if let Some(&(_rem, cs)) = pending.get(&vc) {
+                // rowspan 재방문 — 1 HWP 스텝
+                if row_idx == target_row && target_vcol >= vc && target_vcol < vc + cs {
+                    found_step = Some(hwp_step);
+                    break;
+                }
+                hwp_step += 1;
+                vc += cs;
+            } else if html_idx < row.len() {
+                let (cs, rs) = row[html_idx];
+                html_idx += 1;
+                if row_idx == target_row && target_vcol >= vc && target_vcol < vc + cs {
+                    found_step = Some(hwp_step);
+                    break;
+                }
+                if rs > 1 { pending.insert(vc, (rs, cs)); }
+                hwp_step += 1;
+                vc += cs;
+            } else {
+                // HTML 셀 소진 — 남은 pending 중 더 높은 vcol 있으면 건너뜀
+                let next_pend = pending.keys().find(|&&k| k >= vc).copied();
+                match next_pend {
+                    Some(pvc) => { vc = pvc; }
+                    None => break,
+                }
+            }
+        }
+
+        if row_idx == target_row {
+            return found_step
+                .map(|s| total + s)
+                .ok_or_else(|| anyhow::anyhow!("셀 ({},{})를 표에서 찾을 수 없습니다", target_row, target_vcol));
+        }
+
+        total += hwp_step;
+
+        // 다음 행을 위해 pending rowspan 1 감소
+        let mut new_p: std::collections::BTreeMap<usize, (usize, usize)> = Default::default();
+        for (k, (rem, cs)) in pending {
+            if rem > 1 { new_p.insert(k, (rem - 1, cs)); }
+        }
+        pending = new_p;
+    }
+
+    anyhow::bail!("unreachable")
+}
+
+/// colspan / rowspan 을 반영하여 원시 행 목록을 시각적 그리드로 확장합니다.
+///
+/// rowspan 이 있는 셀은 이후 행의 같은 열에 동일 텍스트가 들어갑니다.
+/// colspan 이 있는 셀은 첫 열에만 텍스트, 나머지 열은 빈 문자열로 채웁니다.
+fn expand_grid_with_spans(raw_rows: &[Vec<(String, usize, usize)>]) -> Vec<Vec<String>> {
+    // pending[col] = (remaining_rows, text)
+    let mut pending: std::collections::BTreeMap<usize, (usize, String)> = Default::default();
+    let mut result: Vec<Vec<String>> = Vec::new();
+
+    for raw_row in raw_rows {
+        let mut row_map: std::collections::BTreeMap<usize, String> = Default::default();
+        let mut col = 0usize;
+        let mut html_idx = 0usize;
+
+        loop {
+            // 현재 col이 rowspan 점유 중이면 pending 값 사용
+            if let Some((rem, text)) = pending.get(&col).cloned() {
+                row_map.insert(col, text.clone());
+                if rem <= 1 { pending.remove(&col); } else { pending.insert(col, (rem - 1, text)); }
+                col += 1;
+                continue;
+            }
+
+            if html_idx < raw_row.len() {
+                // 다음 HTML 셀 배치
+                let (text, colspan, rowspan) = &raw_row[html_idx];
+                html_idx += 1;
+                for c in 0..*colspan {
+                    let cell_text = if c == 0 { text.clone() } else { String::new() };
+                    row_map.insert(col + c, cell_text.clone());
+                    if *rowspan > 1 {
+                        pending.insert(col + c, (*rowspan - 1, cell_text));
+                    }
+                }
+                col += colspan;
+            } else {
+                // HTML 셀 소진 — 남은 pending 열이 있으면 건너뜀
+                let next_pending = pending.keys().find(|&&k| k >= col).copied();
+                match next_pending {
+                    Some(pc) => col = pc,
+                    None => break,
+                }
+            }
+        }
+
+        if row_map.is_empty() { continue; }
+        let max_col = *row_map.keys().next_back().unwrap();
+        let row: Vec<String> = (0..=max_col)
+            .map(|c| row_map.get(&c).cloned().unwrap_or_default())
+            .collect();
+        result.push(row);
+    }
+
+    result
+}
+
+/// HTML 태그 속성에서 colspan / rowspan 값을 파싱합니다.
+/// tag 문자열은 이미 lowercase 처리된 상태여야 합니다.
+fn parse_span_attr(tag: &str, attr: &str) -> usize {
+    let search = format!("{attr}=");
+    let pos = match tag.find(&search) {
+        Some(p) => p + search.len(),
+        None => return 1,
+    };
+    let after = tag[pos..].trim_start_matches('"').trim_start_matches('\'');
+    let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().unwrap_or(1)
+}
+
+/// 문자 단위로 N자까지 자르고 초과 시 "..." 추가. 바이트 슬라이싱 대신 사용.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let collected: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{}...", collected)
+    } else {
+        collected
+    }
+}
+
+/// HTML 특수문자 엔티티 디코딩
+fn decode_html_entities(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&#39;", "'")
+}
+
+/// HTML에 특정 텍스트가 포함되어 있는지 확인합니다.
+/// case_sensitive=false 이면 대소문자 무시 비교.
+/// ForwardFind 호출 전 사전 검증에 사용 (다이얼로그 블로킹 방지).
+fn html_contains_text(html: &str, text: &str, case_sensitive: bool) -> bool {
+    // HTML 태그를 제거한 plain text에서 검색
+    let plain = html_to_plain_text(html);
+    // 검색 패턴과 plain text 양쪽의 공백/개행을 정규화하여 비교
+    // (HWP HTML에서 개행은 태그 경계로 표현되므로 \n은 공백으로 처리)
+    let normalize = |s: &str| -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    let plain_norm = normalize(&plain);
+    let text_norm = normalize(text);
+    if case_sensitive {
+        plain_norm.contains(&text_norm)
+    } else {
+        plain_norm.to_lowercase().contains(&text_norm.to_lowercase())
+    }
+}
+
+/// HTML에서 태그를 제거하고 plain text를 반환합니다.
+fn html_to_plain_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => { in_tag = true; }
+            '>' => { in_tag = false; out.push(' '); }
+            _ if !in_tag => { out.push(ch); }
+            _ => {}
+        }
+    }
+    // 엔티티 디코딩 후 공백 정리
+    decode_html_entities(&out)
 }
 
