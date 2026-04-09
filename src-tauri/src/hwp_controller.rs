@@ -250,6 +250,76 @@ impl HwpController {
         Ok(result.to_string_repr())
     }
 
+    /// HTML에서 누름틀(field) 목록을 파싱합니다.
+    ///
+    /// HWP HTML 출력 포맷:
+    ///   <a name="FieldStart:"></a>     ← 이름 없는 누름틀 시작
+    ///   <a name="FieldStart:이름"></a>  ← 이름 있는 누름틀 시작
+    ///   <span ...>내용</span>
+    ///   <a name="FieldEnd:"></a>       ← 누름틀 끝
+    ///
+    /// placeholder 판별: span에 font-style:italic + color:#ff0000 → 미입력 상태
+    fn parse_fields_from_html(html: &str) -> Vec<HtmlField> {
+        let mut fields = Vec::new();
+        let mut search = html;
+        let mut idx = 0usize;
+
+        while let Some(start_pos) = search.find("<a name=\"FieldStart:") {
+            let after_tag = &search[start_pos..];
+
+            // FieldStart 태그에서 field name 추출
+            let name_start = after_tag.find('"').map(|p| p + 1).unwrap_or(0);
+            let colon_offset = after_tag[name_start..].find(':').unwrap_or(0);
+            let name_end = after_tag[name_start..].find('"').unwrap_or(0);
+            let field_name = if colon_offset + 1 < name_end {
+                after_tag[name_start + colon_offset + 1..name_start + name_end].to_string()
+            } else {
+                String::new()
+            };
+
+            // FieldEnd 위치 찾기
+            let end_marker = "FieldEnd:";
+            let Some(end_pos) = after_tag.find(end_marker) else { break; };
+
+            // FieldStart ~ FieldEnd 사이의 HTML 청크
+            let chunk = &after_tag[..end_pos];
+            let content = extract_plain_text_from_html_chunk(chunk);
+            let is_placeholder = chunk.contains("font-style:italic")
+                && chunk.to_lowercase().contains("color:#ff0000");
+
+            // FieldEnd 이후 텍스트: 다음 FieldStart 또는 단락 끝까지
+            // find_replace 시 고유 문맥(suffix)을 구성하는 데 사용
+            let after_end_html = {
+                let consumed_so_far = end_pos + end_marker.len();
+                // FieldEnd: 뒤에 오는 닫는 '>' 건너뜀
+                let rest = &after_tag[consumed_so_far..];
+                let past_gt = rest.find('>').map(|p| &rest[p + 1..]).unwrap_or(rest);
+                // 다음 FieldStart 또는 </p> 까지의 HTML 청크
+                let next_field = past_gt.find("<a name=\"FieldStart:").unwrap_or(past_gt.len());
+                let next_para  = past_gt.find("</p>").unwrap_or(past_gt.len());
+                &past_gt[..next_field.min(next_para)]
+            };
+            // HTML 태그를 제거하되 <a> 같은 인라인 태그는 공백 삽입 없이 처리
+            let text_after = extract_plain_text_from_html_chunk(after_end_html);
+            let text_after = decode_html_entities(text_after.trim());
+
+            fields.push(HtmlField {
+                index: idx,
+                name: field_name,
+                content: content.trim().to_string(),
+                text_after,
+                is_placeholder,
+            });
+            idx += 1;
+
+            // 다음 FieldStart 검색 위치: consumed = 현재 FieldStart 이후의 FieldEnd 위치 + end_marker 길이
+            let consumed = start_pos + end_pos + end_marker.len();
+            search = &search[consumed..];
+        }
+
+        fields
+    }
+
     /// 문서에서 텍스트가 존재하는지 HTML 문자열에서 확인합니다.
     /// Python PoC의 _text_exists()와 동일 — ForwardFind 호출 전 사전 검증용.
     /// ForwardFind는 텍스트가 없으면 HWP 다이얼로그를 블로킹하므로 이 검사가 필수입니다.
@@ -1497,8 +1567,8 @@ impl HwpController {
                 // VT_BYREF output param을 COM 레이어가 지원하는지 확인합니다.
                 let hwp = self.hwp()?;
                 let init_res = hwp.call("InitScan", vec![
-                    Variant::I32(0), // Range=0: 전체
-                    Variant::I32(0), // Direction=0: 정방향
+                    Variant::I32(0x07), Variant::I32(0x0077),
+                    Variant::Empty, Variant::Empty, Variant::Empty, Variant::Empty,
                 ])?;
                 let init_str = init_res.to_string_repr();
                 // GetText는 (상태코드, 텍스트) 두 output param을 VT_BYREF로 반환 —
@@ -1577,16 +1647,17 @@ impl HwpController {
             "diag_initscan_1param" => {
                 // InitScan 파라미터 개수 탐색 + CreateAction 방식도 시도
                 let hwp = self.hwp()?;
-                // 1개 파라미터
-                let r1 = hwp.call("InitScan", vec![Variant::I32(0x37)]);
-                let _ = hwp.call("ReleaseScan", vec![]);
-                // 0개 파라미터
-                let r2 = hwp.call("InitScan", vec![]);
-                let _ = hwp.call("ReleaseScan", vec![]);
-                // 3개 파라미터 (Range, Direction, 추가 플래그)
-                let r3 = hwp.call("InitScan", vec![
-                    Variant::I32(0), Variant::I32(0), Variant::I32(0),
+                // 6개 파라미터 (option, rang, spara, spos, epara, epos) — 정식 시그니처
+                let r1 = hwp.call("InitScan", vec![
+                    Variant::I32(0x06), Variant::I32(0x0077),
+                    Variant::I32(0), Variant::I32(0), Variant::I32(0), Variant::I32(0),
                 ]);
+                let _ = hwp.call("ReleaseScan", vec![]);
+                // 2개 파라미터 (이전 방식 — 실패 예상)
+                let r2 = hwp.call("InitScan", vec![Variant::I32(0), Variant::I32(0x0077)]);
+                let _ = hwp.call("ReleaseScan", vec![]);
+                // 0개 파라미터 — 실패 예상
+                let r3 = hwp.call("InitScan", vec![]);
                 let _ = hwp.call("ReleaseScan", vec![]);
                 // CreateAction 방식 시도
                 let r_action = hwp.call("CreateAction", vec![Variant::String("InitScan".to_string())])
@@ -1604,10 +1675,9 @@ impl HwpController {
                 // InitScan → GetText+GetPos 루프로 셀 위치 맵 구축
                 let hwp = self.hwp()?;
 
-                // InitScan: 2개 파라미터 (Range=0 전체, Direction=0 정방향)
                 let init_result = hwp.call("InitScan", vec![
-                    Variant::I32(0), // Range
-                    Variant::I32(0), // Direction
+                    Variant::I32(0x07), Variant::I32(0x0077),
+                    Variant::Empty, Variant::Empty, Variant::Empty, Variant::Empty,
                 ])?;
                 let init_str = init_result.to_string_repr();
 
@@ -1729,6 +1799,497 @@ impl HwpController {
                     "target_offset": target_offset_res.map_err(|e| e.to_string()),
                     "delta_tableright": delta,
                     "continuation_map": continuation_map,
+                }).to_string())
+            }
+
+            "probe_scan" => {
+                // InitScan/GetText 실측 진단 도구 (v2)
+                // Phase 1: GetFieldList → MoveToField → GetPos 로 필드 위치 사전 매핑
+                // Phase 2: InitScan/GetText 루프 안에서 GetPos 호출 → 스캔 커서가 위치를 따르는지 확인
+                // 두 위치가 일치하면 스캔 중 필드 감지가 가능함
+                let max_events = args["max_events"].as_u64().unwrap_or(300) as usize;
+                let hwp = self.hwp()?;
+
+                // ── Phase 1: 필드 위치 사전 매핑 ──────────────────────────────────
+                // GetFieldList(option=0, type=1) — type 1 = 누름틀(field control)
+                let field_names = self.get_field_names();
+                let mut field_pos_map: Vec<serde_json::Value> = Vec::new();
+
+                for fname in &field_names {
+                    // MoveToField(name, start=True, select=True, move=True)
+                    // select=True: 필드 내용을 블록으로 선택 → GetSelectedPos 사용 가능
+                    // 출처: 한컴 공식 포럼 (2024-08) — 내용 유무 확인 방법
+                    let moved = hwp.call("MoveToField", vec![
+                        Variant::String(fname.clone()),
+                        Variant::Bool(true),  // start: 필드 시작으로 이동
+                        Variant::Bool(true),  // select: 필드 내용 선택 (GetSelectedPos 활성화)
+                        Variant::Bool(true),  // move: 실제 이동
+                    ]).map(|v| v.as_bool().unwrap_or(false)).unwrap_or(false);
+
+                    // GetPos: 편집 커서 위치 (필드가 속한 단락의 list/para/pos)
+                    let pos = if moved { hwp.get_pos().ok() } else { None };
+
+                    // GetSelectedPos: 선택된 필드 내용의 영역 좌표
+                    // 내용 없음 → None, 내용 있음 → (spara, spos, epara, epos)
+                    let sel_pos = if moved { hwp.get_selected_pos().ok().flatten() } else { None };
+
+                    // CurFieldName: 편집 커서가 필드 안에 있을 때 이름 반환
+                    // 이름 없는 누름틀이면 "" → "[unnamed]"
+                    let cur_field_name_after_move: Option<String> = match hwp.call("CurFieldName", vec![]) {
+                        Ok(v) => {
+                            let s = v.to_string_repr();
+                            if s == "Empty" { None }
+                            else { Some(if s.is_empty() { "[unnamed]".to_string() } else { s }) }
+                        }
+                        Err(_) => None,
+                    };
+
+                    // GetFieldText: 필드의 현재 텍스트 값 (표/도형은 빈 문자열)
+                    let field_text = hwp.call("GetFieldText", vec![
+                        Variant::String(fname.clone()),
+                    ]).map(|v| v.to_string_repr()).ok();
+
+                    field_pos_map.push(json!({
+                        "name":             fname,
+                        "moved":            moved,
+                        "field_text":       field_text,
+                        "pos_list":         pos.map(|(l,_,_)| l),
+                        "pos_para":         pos.map(|(_,p,_)| p),
+                        "pos_char":         pos.map(|(_,_,c)| c),
+                        "sel_spara":        sel_pos.map(|(sp,_,_,_)| sp),
+                        "sel_spos":         sel_pos.map(|(_,ss,_,_)| ss),
+                        "sel_epara":        sel_pos.map(|(_,_,ep,_)| ep),
+                        "sel_epos":         sel_pos.map(|(_,_,_,es)| es),
+                        "cur_field_after_move": cur_field_name_after_move,
+                    }));
+                }
+
+                // ── Phase 2: InitScan/GetText 루프 ────────────────────────────────
+                // option: 0x07 = maskChar|maskInline|maskCtrl (모든 컨트롤 + 누름틀)
+                // rang:   0x0077 = scanSposDocument|scanEposDocument (문서 전체)
+                let init_result = hwp.call("InitScan", vec![
+                    Variant::I32(0x07),   // option: 모든 마스크
+                    Variant::I32(0x0077), // rang: 문서 전체
+                    Variant::Empty,       // spara (rang에 Specified 없으므로 무시)
+                    Variant::Empty,       // spos
+                    Variant::Empty,       // epara
+                    Variant::Empty,       // epos
+                ]).map(|v| v.to_string_repr())
+                  .unwrap_or_else(|e| format!("ERR:{e}"));
+
+                let mut events: Vec<serde_json::Value> = Vec::new();
+
+                for seq in 0..max_events {
+                    let scan = hwp.get_text_scan();
+                    let (text_state, text, ret_code) = match scan {
+                        Err(e) => {
+                            events.push(json!({ "seq": seq, "error": e.to_string() }));
+                            break;
+                        }
+                        Ok(t) => t,
+                    };
+
+                    // GetPos: 스캔 중 호출 — 편집 커서를 따르는지 vs 스캔 커서를 따르는지 측정
+                    let pos_during_scan = hwp.get_pos().ok();
+
+                    // CurFieldName: 편집 커서 기준
+                    // 이름 없는 누름틀은 빈 문자열 "" 반환 → "[unnamed]" 로 표시
+                    // 누름틀 밖이면 COM 오류 또는 VT_EMPTY → None
+                    let cur_field_name: Option<String> = match hwp.call("CurFieldName", vec![]) {
+                        Ok(v) => {
+                            let s = v.to_string_repr();
+                            if s == "Empty" {
+                                None // VT_EMPTY = 누름틀 밖
+                            } else {
+                                Some(if s.is_empty() { "[unnamed]".to_string() } else { s })
+                            }
+                        }
+                        Err(_) => None,
+                    };
+
+                    // CurCtrl: IDispatch 객체 → CtrlID 프로퍼티로 컨트롤 타입 확인
+                    let ctrl_id = hwp.call("CurCtrl", vec![])
+                        .ok()
+                        .and_then(|ctrl_var| ctrl_var.as_object())
+                        .and_then(|ctrl_obj| ctrl_obj.get("CtrlID").ok())
+                        .map(|v| v.to_string_repr())
+                        .and_then(|s| if s.is_empty() || s == "Empty" { None } else { Some(s) });
+
+                    // 문자 경계를 지켜서 자르기 (바이트 슬라이스 패닉 방지)
+                    let text_preview: String = text.chars().take(80).collect();
+                    events.push(json!({
+                        "seq":          seq,
+                        "ret_code":     ret_code,
+                        "text_state":   text_state,
+                        "text":         text_preview,
+                        "pos_list":     pos_during_scan.map(|(l,_,_)| l),
+                        "pos_para":     pos_during_scan.map(|(_,p,_)| p),
+                        "pos_char":     pos_during_scan.map(|(_,_,c)| c),
+                        "cur_field_name": cur_field_name,
+                        "ctrl_id":      ctrl_id,
+                    }));
+
+                    // ret_code 0 또는 text_state 0 = 스캔 종료
+                    if ret_code == 0 || text_state == 0 { break; }
+                }
+
+                let _ = hwp.call("ReleaseScan", vec![]);
+
+                // 요약 통계
+                let state_counts = {
+                    let mut m: std::collections::HashMap<i32, usize> = Default::default();
+                    for ev in &events {
+                        if let Some(s) = ev["text_state"].as_i64() {
+                            *m.entry(s as i32).or_default() += 1;
+                        }
+                    }
+                    let mut counts: Vec<_> = m.into_iter()
+                        .map(|(k,v)| json!({"state": k, "count": v}))
+                        .collect();
+                    counts.sort_by_key(|v| v["state"].as_i64().unwrap_or(0));
+                    counts
+                };
+
+                // 필드 위치와 스캔 이벤트 위치 교차 분석
+                let field_match_analysis: Vec<serde_json::Value> = field_pos_map.iter().map(|fp| {
+                    let fl = fp["pos_list"].as_i64();
+                    let fp_para = fp["pos_para"].as_i64();
+                    // 스캔 이벤트 중 같은 (list, para) 를 가진 이벤트 찾기
+                    let matching_events: Vec<&serde_json::Value> = events.iter()
+                        .filter(|ev| {
+                            ev["pos_list"].as_i64() == fl &&
+                            ev["pos_para"].as_i64() == fp_para
+                        })
+                        .collect();
+                    json!({
+                        "field_name": fp["name"],
+                        "field_pos": {"list": fl, "para": fp_para},
+                        "matching_scan_events": matching_events.len(),
+                        "sample_texts": matching_events.iter().take(3)
+                            .map(|ev| ev["text"].clone())
+                            .collect::<Vec<_>>(),
+                    })
+                }).collect();
+
+                Ok(json!({
+                    "init_result":         init_result,
+                    "total_events":        events.len(),
+                    "state_counts":        state_counts,
+                    "field_count":         field_names.len(),
+                    "field_names":         field_names,
+                    "field_pos_map":       field_pos_map,
+                    "field_match_analysis": field_match_analysis,
+                    "events":              events,
+                }).to_string())
+            }
+
+            // ── 누름틀 필드 관련 Tool ─────────────────────────────────────
+
+            // HTML FieldStart:/FieldEnd: 파싱으로 누름틀 목록 반환
+            // 이름 없는 누름틀도 감지됨 (GetFieldList와 달리)
+            // placeholder 판별: font-style:italic + color:#ff0000
+            "get_document_fields" => {
+                let html = self.get_html()?;
+                let fields = Self::parse_fields_from_html(&html);
+
+                let result: Vec<serde_json::Value> = fields.iter().map(|f| json!({
+                    "index":          f.index,
+                    "name":           if f.name.is_empty() { json!(null) } else { json!(f.name) },
+                    "content":        f.content,
+                    "text_after":     f.text_after.chars().take(30).collect::<String>(),
+                    "is_placeholder": f.is_placeholder,
+                    "status":         if f.is_placeholder { "미입력" } else { "입력됨" },
+                })).collect();
+
+                Ok(json!({
+                    "count":  fields.len(),
+                    "fields": result,
+                }).to_string())
+            }
+
+            // 누름틀에 값 설정
+            // 전략: ForwardFind(SearchCtrl=true)로 누름틀 내부 텍스트 검색
+            //       → GetPos.list != 0 이면 필드 내부 → PutString으로 교체
+            // MoveToField / CurFieldName / MoveNextChar list-change — 모두 unnamed 필드 미지원 확인됨
+            "fill_field" => {
+                let placeholder = args["placeholder"].as_str()
+                    .ok_or_else(|| anyhow::anyhow!("placeholder 파라미터가 없습니다"))?
+                    .to_string();
+                let value = args["value"].as_str()
+                    .ok_or_else(|| anyhow::anyhow!("value 파라미터가 없습니다"))?
+                    .to_string();
+
+                // HTML에서 필드 메타 정보 (index, name, 존재 확인)
+                let html = self.get_html()?;
+                let fields = Self::parse_fields_from_html(&html);
+                let target = fields.iter()
+                    .find(|f| f.content == placeholder || (!f.name.is_empty() && f.name == placeholder));
+                let Some(field) = target else {
+                    let available: Vec<&str> = fields.iter().map(|f| f.content.as_str()).collect();
+                    anyhow::bail!("'{placeholder}' 와 일치하는 누름틀 없음. 사용 가능: {available:?}");
+                };
+                let field_index = field.index;
+                let field_name  = field.name.clone();
+
+                // 목표 필드(field_index) 앞에 동일 placeholder를 가진 누름틀이 몇 개인지 계산
+                // → ForwardFind 루프에서 그 수만큼 건너뛰어야 정확한 누름틀에 도달
+                let skip_count = fields.iter()
+                    .filter(|f| f.index < field_index && (f.content == placeholder || (!f.name.is_empty() && f.name == placeholder)))
+                    .count();
+
+                let hwp = self.hwp()?;
+                // 찾기/바꾸기 관련 "문서 끝까지 찾았습니다" 다이얼로그 자동 응답
+                // (다이얼로그가 COM Execute 호출을 블록하면 exec_ok=false가 됨)
+                let _ = hwp.call("SetMessageBoxMode", vec![Variant::I32(0x00F0)]);
+                let _ = hwp.call("Run", vec![Variant::String("MoveDocBegin".to_string())]);
+
+                // ForwardFind를 반복 호출해서 placeholder를 찾음
+                // GetPos.list != 0 이면 커서가 누름틀 내부 (성공)
+                // GetPos.list == 0 이면 본문 텍스트 (건너뜀, 다시 탐색)
+                let mut find_log: Vec<Value> = Vec::new();
+                let mut found = false;
+                let mut put_ok = false;
+                let mut put_err: Option<String> = None;
+                let mut sel_pos: Option<(i32,i32,i32,i32)> = None;
+                let mut new_content = String::new();
+                // 이미 시도한 (list,para,char) → 순환 감지용
+                let mut tried_positions: Vec<(i32, i32, i32)> = Vec::new();
+
+                // 누름틀 컨텍스트 판별
+                let non_field_ctrls: &[&str] = &["표", "머리말", "꼬리말", "각주", "미주", "글상자"];
+
+                'find_loop: for iter in 0..20usize {
+                    let act = match hwp.call("CreateAction", vec![
+                        Variant::String("ForwardFind".to_string()),
+                    ]).ok().and_then(|v| v.as_object()) {
+                        Some(a) => a,
+                        None => {
+                            find_log.push(json!({"iter": iter, "error": "CreateAction 실패"}));
+                            break;
+                        }
+                    };
+                    let ps = match act.call("CreateSet", vec![]).ok().and_then(|v| v.as_object()) {
+                        Some(p) => p,
+                        None => {
+                            find_log.push(json!({"iter": iter, "error": "CreateSet 실패"}));
+                            break;
+                        }
+                    };
+
+                    let setitems: &[(&str, Variant)] = &[
+                        ("FindString",    Variant::String(placeholder.clone())),
+                        ("ReplaceString", Variant::String(String::new())),
+                        ("IgnoreCase",    Variant::Bool(false)),
+                        ("AllWordReplace",Variant::Bool(false)),
+                        ("Direction",     Variant::I32(0)),
+                        ("FindRegExp",    Variant::Bool(false)),
+                        ("SearchTbl",     Variant::Bool(true)),
+                        ("SearchCtrl",    Variant::Bool(true)),
+                        ("FindOpt",       Variant::I32(0x3F)),
+                    ];
+                    for (k, v) in setitems {
+                        let _ = ps.call("SetItem", vec![
+                            Variant::String(k.to_string()),
+                            v.clone(),
+                        ]);
+                    }
+
+                    let exec_ok = act.call("Execute", vec![Variant::Object(ps)]).is_ok();
+                    let pos = hwp.get_pos().ok();
+                    let cur_list = pos.map(|(l,_,_)| l).unwrap_or(0);
+                    let ctrl_name = hwp.key_indicator().unwrap_or_default();
+                    let pos_key = pos.unwrap_or((0,0,0));
+
+                    find_log.push(json!({
+                        "iter":      iter,
+                        "exec_ok":   exec_ok,
+                        "list":      cur_list,
+                        "para":      pos.map(|(_,p,_)| p),
+                        "char":      pos.map(|(_,_,c)| c),
+                        "ctrl_name": ctrl_name,
+                    }));
+
+                    if !exec_ok { break; }
+
+                    // 순환 감지: 이미 시도한 위치면 전체 탐색 완료
+                    if tried_positions.contains(&pos_key) {
+                        break;
+                    }
+
+                    if cur_list != 0 && !non_field_ctrls.contains(&ctrl_name.as_str()) {
+                        // 누름틀 후보 → 즉시 Paste 시도 후 HTML로 검증
+                        tried_positions.push(pos_key);
+                        sel_pos = hwp.get_selected_pos().ok().flatten();
+
+                        let paste_result = crate::com_dispatch::set_clipboard_text(&value)
+                            .and_then(|_| hwp.call("Run", vec![Variant::String("Paste".to_string())])
+                                .map_err(|e| anyhow::anyhow!(e)));
+                        put_ok = paste_result.is_ok();
+                        put_err = paste_result.err().map(|e| e.to_string());
+
+                        if put_ok {
+                            // 올바른 필드가 바뀌었는지 HTML로 즉시 확인
+                            let check_html = self.get_html()?;
+                            let check_fields = Self::parse_fields_from_html(&check_html);
+                            new_content = check_fields.get(field_index)
+                                .map(|f| f.content.clone())
+                                .unwrap_or_default();
+
+                            if new_content == value {
+                                found = true;
+                                break 'find_loop; // 성공
+                            }
+
+                            // 틀린 위치에 붙여넣음 → Undo 후 계속 탐색
+                            let _ = hwp.call("Run", vec![Variant::String("Undo".to_string())]);
+                            // 현재 위치 지나쳐야 재발견 안 됨: 커서를 placeholder 길이만큼 전진
+                            for _ in 0..=placeholder.chars().count() {
+                                let _ = hwp.call("Run", vec![Variant::String("MoveNextChar".to_string())]);
+                            }
+                        }
+                    }
+                }
+
+                // 메시지박스 모드 복원
+                let _ = hwp.call("SetMessageBoxMode", vec![Variant::I32(0x0000)]);
+
+                Ok(json!({
+                    "success":     found,
+                    "method":      "ForwardFind+Paste+Verify",
+                    "field_index": field_index,
+                    "field_name":  if field_name.is_empty() { json!(null) } else { json!(field_name) },
+                    "placeholder": placeholder,
+                    "value":       value,
+                    "new_content": new_content,
+                    "put_ok":      put_ok,
+                    "put_err":     put_err,
+                    "sel_pos":     sel_pos.map(|(sp,ss,ep,es)| json!({"spara":sp,"spos":ss,"epara":ep,"epos":es})),
+                    "find_log":    find_log,
+                }).to_string())
+            }
+
+            // 커서 이동 + CurFieldName 진단 도구
+            // 1. MoveDocBegin → GetPos
+            // 2. MoveNextChar × n → 각 단계 GetPos + CurFieldName 기록
+            // 3. 커서가 이동하는지, 필드를 감지하는지 확인
+            "diag_nav" => {
+                let steps = args["steps"].as_u64().unwrap_or(20) as usize;
+                let hwp = self.hwp()?;
+
+                let _ = hwp.call("Run", vec![Variant::String("MoveDocBegin".to_string())]);
+                let initial_pos = hwp.get_pos().ok();
+
+                let mut log = Vec::new();
+                let mut prev_list: i32 = 0;
+                for step in 0..steps {
+                    let _ = hwp.call("Run", vec![Variant::String("MoveNextChar".to_string())]);
+                    let pos = hwp.get_pos().ok();
+                    let cur_list = pos.map(|(l,_,_)| l).unwrap_or(0);
+                    let list_changed = cur_list != prev_list;
+                    prev_list = cur_list;
+                    log.push(json!({
+                        "step":         step,
+                        "list":         cur_list,
+                        "para":         pos.map(|(_,p,_)| p),
+                        "char":         pos.map(|(_,_,c)| c),
+                        "list_changed": list_changed,
+                    }));
+                }
+
+                Ok(json!({
+                    "initial_pos": {
+                        "list": initial_pos.map(|(l,_,_)| l),
+                        "para": initial_pos.map(|(_,p,_)| p),
+                        "char": initial_pos.map(|(_,_,c)| c),
+                    },
+                    "steps": log,
+                }).to_string())
+            }
+
+            "get_field_list" => {
+                let hwp = self.hwp()?;
+
+                // type=0: 모든 필드, type=1: 누름틀만 — 둘 다 시도해서 비교
+                let try_field_list = |opt: i32, typ: i32| {
+                    hwp.call("GetFieldList", vec![Variant::I32(opt), Variant::I32(typ)])
+                       .map(|v| v.to_string_repr())
+                       .unwrap_or_default()
+                };
+
+                let raw_t0 = try_field_list(0, 0);
+                let raw_t1 = try_field_list(0, 1);
+                let raw_t3 = try_field_list(0, 3); // 한컴 일부 버전: type=3=유형 포함
+
+                // 구분자 진단 — \x02 외에 다른 구분자 사용 여부 확인
+                let sep_counts = |s: &str| json!({
+                    "len":   s.len(),
+                    "0x02":  s.chars().filter(|&c| c == '\x02').count(),
+                    "0x01":  s.chars().filter(|&c| c == '\x01').count(),
+                    "newline": s.chars().filter(|&c| c == '\n').count(),
+                    "preview": s.chars().take(200).collect::<String>(),
+                });
+
+                let fields_t0: Vec<&str> = raw_t0.split('\x02').filter(|s| !s.is_empty()).collect();
+                let fields_t1: Vec<&str> = raw_t1.split('\x02').filter(|s| !s.is_empty()).collect();
+                let fields_t3: Vec<&str> = raw_t3.split('\x02').filter(|s| !s.is_empty()).collect();
+
+                Ok(json!({
+                    "type0_all":    { "count": fields_t0.len(), "fields": fields_t0, "raw": sep_counts(&raw_t0) },
+                    "type1_field":  { "count": fields_t1.len(), "fields": fields_t1, "raw": sep_counts(&raw_t1) },
+                    "type3_typed":  { "count": fields_t3.len(), "fields": fields_t3, "raw": sep_counts(&raw_t3) },
+                }).to_string())
+            }
+
+            // GetFieldText(name) — 누름틀의 현재 텍스트 값 반환
+            // 표/도형이 있는 필드는 빈 문자열 반환 (GetFieldText 한계)
+            // 모든 필드의 현재 값을 한 번에 반환합니다
+            "get_field_values" => {
+                let hwp = self.hwp()?;
+                let raw = hwp.call("GetFieldList", vec![
+                    Variant::I32(0),
+                    Variant::I32(1),
+                ]).map(|v| v.to_string_repr()).unwrap_or_default();
+
+                let fields: Vec<&str> = raw.split('\x02').filter(|s| !s.is_empty()).collect();
+                let mut values: Vec<serde_json::Value> = Vec::new();
+
+                for fname in &fields {
+                    let text = hwp.call("GetFieldText", vec![
+                        Variant::String(fname.to_string()),
+                    ]).map(|v| v.to_string_repr()).unwrap_or_default();
+
+                    values.push(json!({
+                        "name":  fname,
+                        "value": text,
+                        "empty": text.is_empty(),
+                    }));
+                }
+
+                Ok(json!({
+                    "count":  fields.len(),
+                    "fields": values,
+                }).to_string())
+            }
+
+            // SetFieldText(name, value) — 누름틀에 텍스트 값 설정
+            // 필드에 표/도형이 포함된 경우 이 API로는 설정 불가 (텍스트 전용)
+            "set_field" => {
+                let name = args["name"].as_str()
+                    .ok_or_else(|| anyhow::anyhow!("name 파라미터가 없습니다"))?;
+                let value = args["value"].as_str()
+                    .ok_or_else(|| anyhow::anyhow!("value 파라미터가 없습니다"))?;
+
+                let hwp = self.hwp()?;
+                let ok = hwp.call("SetFieldText", vec![
+                    Variant::String(name.to_string()),
+                    Variant::String(value.to_string()),
+                ]).map(|v| v.as_bool().unwrap_or(true))
+                  .unwrap_or(false);
+
+                Ok(json!({
+                    "success": ok,
+                    "name":    name,
+                    "value":   value,
                 }).to_string())
             }
 
@@ -2181,8 +2742,40 @@ fn decode_html_entities(s: &str) -> String {
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
-        .replace("&nbsp;", " ")
+        .replace("&nbsp;", " ")    // non-breaking space → 일반 공백
+        .replace("&middot;", "·") // 가운뎃점
+        .replace("&bull;", "•")
+        .replace("&ndash;", "–")
+        .replace("&mdash;", "—")
+        .replace("&laquo;", "«")
+        .replace("&raquo;", "»")
         .replace("&#39;", "'")
+        .replace("&#160;", " ")   // non-breaking space numeric
+}
+
+/// HWP HTML에서 파싱된 누름틀 필드 정보
+#[derive(Debug)]
+struct HtmlField {
+    index: usize,         // 문서 내 순서 (0-based)
+    name: String,         // 필드 이름 (비어있으면 unnamed)
+    content: String,      // 현재 내용 (placeholder 또는 실제 값)
+    text_after: String,   // FieldEnd 직후 리터럴 텍스트 (find_replace 문맥용)
+    is_placeholder: bool, // italic+red = 미입력 placeholder
+}
+
+/// HTML 청크(태그 포함)에서 plain text만 추출
+fn extract_plain_text_from_html_chunk(html: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => { in_tag = true; }
+            '>' => { in_tag = false; }
+            _ if !in_tag => { out.push(ch); }
+            _ => {}
+        }
+    }
+    decode_html_entities(&out)
 }
 
 /// HTML에 특정 텍스트가 포함되어 있는지 확인합니다.
@@ -2206,18 +2799,36 @@ fn html_contains_text(html: &str, text: &str, case_sensitive: bool) -> bool {
 }
 
 /// HTML에서 태그를 제거하고 plain text를 반환합니다.
+///
+/// 블록 요소(<p> <br> <tr> <td> <div>)만 개행/공백 삽입.
+/// <a> <span> 같은 인라인 태그는 공백 삽입 없이 처리.
+/// → "학년</span><a ...>학년 (" 이 "학년학년 (" 으로 올바르게 합쳐짐.
 fn html_to_plain_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut in_tag = false;
+    let mut tag_buf = String::new();
     for ch in html.chars() {
         match ch {
-            '<' => { in_tag = true; }
-            '>' => { in_tag = false; out.push(' '); }
-            _ if !in_tag => { out.push(ch); }
-            _ => {}
+            '<' => { in_tag = true; tag_buf.clear(); }
+            '>' => {
+                in_tag = false;
+                // 태그 이름 추출 (선행 '/' 제거 후 소문자화)
+                let tag_name = tag_buf
+                    .trim_start_matches('/')
+                    .split(|c: char| c.is_whitespace())
+                    .next()
+                    .unwrap_or("")
+                    .to_lowercase();
+                // 블록 요소에만 개행 삽입
+                if matches!(tag_name.as_str(), "p" | "br" | "tr" | "td" | "th" | "div" | "li") {
+                    out.push('\n');
+                }
+                // 인라인 요소(<a>, <span>, <b>, <i> 등) → 공백 없음
+            }
+            _ if in_tag => { tag_buf.push(ch); }
+            _ => { out.push(ch); }
         }
     }
-    // 엔티티 디코딩 후 공백 정리
     decode_html_entities(&out)
 }
 

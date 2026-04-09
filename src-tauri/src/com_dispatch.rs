@@ -15,7 +15,7 @@ mod platform {
                     DISPATCH_FLAGS, DISPATCH_METHOD, DISPATCH_PROPERTYGET,
                     DISPATCH_PROPERTYPUT, DISPPARAMS, EXCEPINFO,
                 },
-                Ole::GetActiveObject,
+                Ole::{GetActiveObject, SafeArrayGetElement},
                 Variant::{VARIANT, VARENUM, VT_BOOL, VT_BSTR, VT_DISPATCH, VT_EMPTY, VT_I4, VT_R8},
             },
         },
@@ -275,6 +275,27 @@ mod platform {
     }
 
     impl ComObject {
+        /// hwp.GetSelectedPos() — 현재 선택된 블록의 위치 정보 반환
+        /// MoveToField(name, true, true, true) 후 호출하면 필드 선택 영역의 좌표를 반환합니다.
+        /// 내용이 없는 필드는 null 반환 → Variant::Empty
+        /// 내용이 있으면 IDispatch 객체 → spara, spos, epara, epos 프로퍼티
+        ///
+        /// 출처: 한컴 공식 포럼 (2024-08)
+        pub fn get_selected_pos(&self) -> anyhow::Result<Option<(i32, i32, i32, i32)>> {
+            let result = self.call("GetSelectedPos", vec![])?;
+            match result {
+                Variant::Empty => Ok(None),
+                Variant::Object(obj) => {
+                    let spara = obj.get("spara")?.as_i32().unwrap_or(0);
+                    let spos  = obj.get("spos")?.as_i32().unwrap_or(0);
+                    let epara = obj.get("epara")?.as_i32().unwrap_or(0);
+                    let epos  = obj.get("epos")?.as_i32().unwrap_or(0);
+                    Ok(Some((spara, spos, epara, epos)))
+                }
+                _ => Ok(None),
+            }
+        }
+
         /// hwp.SetPos(list, para, pos) — 커서를 특정 좌표로 직접 이동
         pub fn set_pos(&self, list: i32, para: i32, pos: i32) -> anyhow::Result<bool> {
             let result = self.call(
@@ -284,26 +305,28 @@ mod platform {
             Ok(result.as_bool().unwrap_or(false))
         }
 
-        /// hwp.GetText(textState, text) — InitScan 루프에서 셀 단위 텍스트 순회
-        /// textState: 단락 유형 코드 (0=문서 끝, 1~=각종 단락/필드 유형)
-        /// Returns: (textState, text, ret_code)
+        /// hwp.GetText(&strBuffer) → int state
+        ///
+        /// 실제 시그니처: GetText(BSTR* text) → int
+        ///   - 파라미터: VT_BYREF|VT_BSTR 1개 (출력 버퍼)
+        ///   - 반환값:   state 코드 (0=문서 끝, 양수=단락/컨트롤 유형)
+        ///
+        /// 출처: HWP 공식 C++ 예제
+        ///   CComBSTR strBuffer;
+        ///   int nLen = myHwpObj.GetText(&strBuffer);
         pub fn get_text_scan(&self) -> anyhow::Result<(i32, String, i32)> {
             unsafe {
                 let dispid = self.get_dispid("GetText")?;
 
-                let mut text_state: i32 = 0;
                 let mut text_bstr = BSTR::default();
 
-                // COM 역순: text(BSTR), textState(I4)
-                let mut raws = [
-                    make_byref_bstr(&mut text_bstr),
-                    make_byref_i4(&mut text_state),
-                ];
+                // VT_BYREF|VT_BSTR 1개: 텍스트 출력 버퍼
+                let mut raws = [make_byref_bstr(&mut text_bstr)];
 
                 let dp = DISPPARAMS {
                     rgvarg: raws.as_mut_ptr(),
                     rgdispidNamedArgs: std::ptr::null_mut(),
-                    cArgs: 2,
+                    cArgs: 1,
                     cNamedArgs: 0,
                 };
                 let mut result = VARIANT::default();
@@ -316,9 +339,10 @@ mod platform {
                     &dp, Some(&mut result), Some(&mut ei), Some(&mut ae),
                 ).map_err(|e| anyhow::anyhow!("GetText 실패: {e}"))?;
 
-                let ret_code = raw_to_variant(result)?.as_i32().unwrap_or(-1);
+                // 반환값 = state 코드 (int)
+                let state = raw_to_variant(result)?.as_i32().unwrap_or(0);
                 let text = text_bstr.to_string();
-                Ok((text_state, text, ret_code))
+                Ok((state, text, state))
             }
         }
 
@@ -403,6 +427,57 @@ mod platform {
                 Ok(ctrl_name)
             }
         }
+    }
+
+    /// Windows 클립보드에 유니코드 텍스트를 씁니다.
+    /// ForwardFind로 텍스트가 선택된 상태에서 hwp.Run("Paste") 와 함께 사용.
+    pub fn set_clipboard_text(text: &str) -> anyhow::Result<()> {
+        use windows::Win32::Foundation::{HANDLE, HWND};
+        use windows::Win32::System::DataExchange::{
+            OpenClipboard, EmptyClipboard, SetClipboardData, CloseClipboard,
+        };
+        use windows::Win32::System::Memory::{
+            GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+        };
+        const CF_UNICODETEXT: u32 = 13;
+
+        unsafe {
+            OpenClipboard(HWND(0))
+                .map_err(|e| anyhow::anyhow!("OpenClipboard 실패: {e}"))?;
+
+            if let Err(e) = EmptyClipboard() {
+                let _ = CloseClipboard();
+                anyhow::bail!("EmptyClipboard 실패: {e}");
+            }
+
+            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let byte_size = wide.len() * 2;
+
+            let hmem = match GlobalAlloc(GMEM_MOVEABLE, byte_size) {
+                Ok(h) => h,
+                Err(e) => {
+                    let _ = CloseClipboard();
+                    anyhow::bail!("GlobalAlloc 실패: {e}");
+                }
+            };
+
+            let ptr = GlobalLock(hmem) as *mut u16;
+            if ptr.is_null() {
+                let _ = CloseClipboard();
+                anyhow::bail!("GlobalLock 실패");
+            }
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+            let _ = GlobalUnlock(hmem);
+
+            if let Err(e) = SetClipboardData(CF_UNICODETEXT, HANDLE(hmem.0 as isize)) {
+                let _ = CloseClipboard();
+                anyhow::bail!("SetClipboardData 실패: {e}");
+            }
+
+            CloseClipboard()
+                .map_err(|e| anyhow::anyhow!("CloseClipboard 실패: {e}"))?;
+        }
+        Ok(())
     }
 
     unsafe fn variant_to_raw(v: &Variant) -> VARIANT {
@@ -511,6 +586,9 @@ mod platform {
         pub fn get_pos(&self) -> anyhow::Result<(i32, i32, i32)> {
             anyhow::bail!("COM automation은 Windows 전용입니다.")
         }
+        pub fn get_selected_pos(&self) -> anyhow::Result<Option<(i32, i32, i32, i32)>> {
+            anyhow::bail!("COM automation은 Windows 전용입니다.")
+        }
         pub fn key_indicator(&self) -> anyhow::Result<String> {
             anyhow::bail!("COM automation은 Windows 전용입니다.")
         }
@@ -523,6 +601,9 @@ mod platform {
     }
     pub fn com_initialize() -> anyhow::Result<()> { Ok(()) }
     pub fn com_uninitialize() {}
+    pub fn set_clipboard_text(_text: &str) -> anyhow::Result<()> {
+        anyhow::bail!("클립보드 COM automation은 Windows 전용입니다.")
+    }
 }
 
-pub use platform::{com_initialize, com_uninitialize, ComObject, Variant};
+pub use platform::{com_initialize, com_uninitialize, set_clipboard_text, ComObject, Variant};

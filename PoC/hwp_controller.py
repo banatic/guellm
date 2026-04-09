@@ -617,6 +617,79 @@ class HwpController:
     # 카테고리 7: Raw Action Bridge
     # ──────────────────────────────────────────────
 
+    # ──────────────────────────────────────────────
+    # 진단 (Probe) — 실측용, 프로덕션 미사용
+    # ──────────────────────────────────────────────
+
+    def probe_scan(self, max_events: int = 500) -> list[dict]:
+        """
+        InitScan/GetText의 실제 동작을 실측합니다.
+        각 이벤트마다 state, text와 함께 접근 가능한 모든 컨텍스트 속성을 기록합니다.
+
+        반환 형식:
+          [
+            {
+              "seq": int,          # 이벤트 순번
+              "state": int,        # GetText() 반환 state
+              "text": str,         # GetText() 반환 text
+              "cur_field_name": str | None,   # 누름틀 안이면 이름, 아니면 None
+              "cur_ctrl_id": str | None,      # CurCtrl.CtrlID (4-char code)
+              "cur_ctrl_type": int | None,    # CurCtrl.Type (있는 경우)
+              "notes": [str],                 # 파싱 중 특이사항
+            },
+            ...
+          ]
+        """
+        self._ensure()
+        events: list[dict] = []
+        self.hwp.InitScan(option=0x03)
+        try:
+            for seq in range(max_events):
+                state, text = self.hwp.GetText()
+                ev: dict = {
+                    "seq": seq,
+                    "state": state,
+                    "text": text,
+                    "cur_field_name": None,
+                    "cur_ctrl_id": None,
+                    "cur_ctrl_type": None,
+                    "notes": [],
+                }
+
+                # ── CurFieldName ──────────────────────────────
+                try:
+                    v = self.hwp.CurFieldName
+                    ev["cur_field_name"] = v if v else None
+                except Exception as e:
+                    ev["notes"].append(f"CurFieldName ERR: {e}")
+
+                # ── CurCtrl ───────────────────────────────────
+                try:
+                    ctrl = self.hwp.CurCtrl
+                    if ctrl is not None:
+                        try:
+                            ev["cur_ctrl_id"] = ctrl.CtrlID
+                        except Exception:
+                            pass
+                        try:
+                            ev["cur_ctrl_type"] = ctrl.Type
+                        except Exception:
+                            pass
+                except Exception as e:
+                    ev["notes"].append(f"CurCtrl ERR: {e}")
+
+                events.append(ev)
+
+                if state == 0:
+                    break
+        finally:
+            try:
+                self.hwp.ReleaseScan()
+            except Exception:
+                pass
+
+        return events
+
     def execute_raw_action(self, action_id: str, params: dict = None) -> str:
         """
         ActionTable.md의 모든 Action을 직접 실행합니다.
@@ -713,6 +786,9 @@ class HwpController:
                 return self.execute_raw_action(
                     tool_args["action_id"], tool_args.get("params")
                 )
+            elif tool_name == "probe_scan":
+                events = self.probe_scan(tool_args.get("max_events", 300))
+                return json.dumps(events, ensure_ascii=False)
             else:
                 return f"❌ 알 수 없는 도구: {tool_name}"
         except KeyError as e:

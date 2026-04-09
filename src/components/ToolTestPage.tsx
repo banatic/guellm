@@ -49,6 +49,27 @@ const TOOLS: ToolDef[] = [
     required: [],
   },
   {
+    name: "get_document_fields",
+    description: "HTML FieldStart:/FieldEnd: 파싱으로 문서 내 모든 누름틀을 감지합니다. 이름 없는 필드도 포함. placeholder 여부(미입력 = italic+red)를 함께 반환.",
+    category: "read",
+    params: {},
+    required: [],
+  },
+  {
+    name: "get_field_list",
+    description: "GetFieldList COM 진단용 — 이름 있는 누름틀만 반환됩니다. 이름 없으면 빈 결과.",
+    category: "read",
+    params: {},
+    required: [],
+  },
+  {
+    name: "get_field_values",
+    description: "이름 있는 누름틀의 현재 값을 반환합니다. 이름 없는 필드는 get_document_fields 사용.",
+    category: "read",
+    params: {},
+    required: [],
+  },
+  {
     name: "get_all_tables_overview",
     description: "문서 내 모든 표의 인덱스, 행/열 수, 헤더를 한 번에 반환합니다.",
     category: "read",
@@ -188,6 +209,26 @@ const TOOLS: ToolDef[] = [
     required: ["page_number", "action"],
   },
   {
+    name: "fill_field",
+    description: "누름틀에 값을 설정합니다. 이름 없는 필드는 placeholder 텍스트로 찾아 ForwardFind+SetFieldText(\"\") 방식으로 채웁니다.",
+    category: "write",
+    params: {
+      placeholder: { type: "string", description: "채울 필드의 현재 placeholder 텍스트 (예: '학년', '과목명')" },
+      value: { type: "string", description: "설정할 값" },
+    },
+    required: ["placeholder", "value"],
+  },
+  {
+    name: "set_field",
+    description: "이름 있는 누름틀에 값을 설정합니다. SetFieldText(name, value) 직접 호출.",
+    category: "write",
+    params: {
+      name:  { type: "string", description: "필드 이름 (get_document_fields로 확인)" },
+      value: { type: "string", description: "설정할 텍스트 값" },
+    },
+    required: ["name", "value"],
+  },
+  {
     name: "export_to_pdf",
     description: "현재 문서를 PDF로 저장합니다.",
     category: "write",
@@ -260,6 +301,16 @@ const TOOLS: ToolDef[] = [
       limit: { type: "integer", description: "미리보기 최대 문자 수 (기본 2000)", default: 2000 },
     },
     required: ["table_index"],
+  },
+  {
+    name: "probe_scan",
+    description:
+      "InitScan/GetText 실측 — 각 이벤트의 state 값, text, CurFieldName(누름틀 감지), CurCtrl.CtrlID를 기록합니다. HTML 파싱 대체 구현 전 API 동작 확인용.",
+    category: "diag",
+    params: {
+      max_events: { type: "integer", description: "수집할 최대 이벤트 수 (기본 300)", default: 300 },
+    },
+    required: [],
   },
   {
     name: "diag_initscan_gettext",
@@ -335,12 +386,27 @@ const TOOLS: ToolDef[] = [
     },
     required: [],
   },
+  {
+    name: "diag_nav",
+    description:
+      "MoveDocBegin 후 MoveNextChar를 steps회 반복하며 GetPos + CurFieldName을 기록. 커서 이동 여부, 누름틀 감지 여부 확인.",
+    category: "diag",
+    params: {
+      steps: { type: "integer", description: "이동 횟수 (기본 20)", default: 20 },
+    },
+    required: [],
+  },
 ];
 
 const TOOL_ICONS: Record<string, React.ReactNode> = {
   analyze_document_structure: <FileText size={13} />,
   get_document_text: <FileText size={13} />,
   get_field_info: <Type size={13} />,
+  get_document_fields: <Type size={13} />,
+  get_field_list: <Type size={13} />,
+  get_field_values: <Type size={13} />,
+  fill_field: <Type size={13} />,
+  set_field: <Type size={13} />,
   get_all_tables_overview: <Table2 size={13} />,
   get_table_schema: <Table2 size={13} />,
   get_cell_text: <Table2 size={13} />,
@@ -359,6 +425,7 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   export_to_pdf: <FileOutput size={13} />,
   execute_raw_action: <Zap size={13} />,
   // diag
+  probe_scan: <FlaskConical size={13} />,
   diag_raw_html: <FlaskConical size={13} />,
   diag_text_file_txt: <FlaskConical size={13} />,
   diag_normalize_keyword: <FlaskConical size={13} />,
@@ -372,6 +439,7 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   diag_scan_table_positions: <FlaskConical size={13} />,
   diag_phys_structure: <FlaskConical size={13} />,
   diag_table_cell_walk: <FlaskConical size={13} />,
+  diag_nav: <FlaskConical size={13} />,
 };
 
 function categoryColor(cat: ToolDef["category"]) {

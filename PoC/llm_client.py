@@ -267,6 +267,25 @@ HWP_TOOLS: list[dict] = [
         },
     },
     {
+        "name": "probe_scan",
+        "description": (
+            "InitScan/GetText의 실제 동작을 실측합니다. "
+            "각 이벤트마다 state 값, text, CurFieldName(누름틀 감지), CurCtrl.CtrlID를 기록합니다. "
+            "새 문서 구조 파악이나 누름틀 위치 디버깅 시 사용하세요. "
+            "max_events 기본값은 300입니다."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "max_events": {
+                    "type": "integer",
+                    "description": "수집할 최대 이벤트 수 (기본 300)",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "execute_raw_action",
         "description": (
             "ActionTable.md의 모든 HWP COM Action을 직접 실행합니다. "
